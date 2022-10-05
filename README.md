@@ -1,1 +1,1 @@
-# NeRF_Code_Implementation
+# [Study] NeRF Code Implementation
