@@ -4,41 +4,42 @@ import torch.nn as nn
 from JH_data_loader import Rays_DATALOADER, Rays_DATASET, LLFF
 # NeRF 네트워크 + Positional Encoding + Stratified sampling + Hierarchical sampling
 
-base_dir = './data/nerf_llff_data/fern'
-factor = 8
-images, poses, bds, render_poses, i_val = LLFF(base_dir, factor).outputs()
-# print(i_val) # 12
-pts_channel = 63 # position
-output_channel = 4 # rgb + density
-dir_channel = 27 # viewing_dirs
-batch_size = 1024
-sample_num = 64 # stratified sampling
-near = 0.
-far = 1.
-L_pts = 10
-L_dirs = 4
+# base_dir = './data/nerf_llff_data/fern'
+# factor = 8
+# images, poses, bds, render_poses, i_val = LLFF(base_dir, factor).outputs()
+# # print(i_val) # 12
+# pts_channel = 63 # position
+# output_channel = 4 # rgb + density
+# dir_channel = 27 # viewing_dirs
+# batch_size = 1024
+# sample_num = 64 # stratified sampling
+# near = 0.
+# far = 1.
+# L_pts = 10
+# L_dirs = 4
 
-height = 3024 // factor
-width = 4032 // factor
-focal = 3260.526333 // factor
-# K = [3, 3] -> K[0][2] = 0.5*W, K[0][0] = focal, K[1][2] = 0.5*H, K[1][1] = focal
-intrinsic = np.array([
-            [focal, 0, 0.5*width], # 0.5*W = x축 방향의 주점
-            [0, focal, 0.5*height], # 0.5*H = y축 방향의 주점
-            [0, 0, 1]])
+# height = 3024 // factor # 378
+# width = 4032 // factor # 504
 
-samples = Rays_DATASET(height, width, intrinsic, poses, i_val, images, near=1.0, ndc_space=True, train=True)
+# focal = 3260.526333 // factor
+# # K = [3, 3] -> K[0][2] = 0.5*W, K[0][0] = focal, K[1][2] = 0.5*H, K[1][1] = focal
+# intrinsic = np.array([
+#             [focal, 0, 0.5*width], # 0.5*W = x축 방향의 주점
+#             [0, focal, 0.5*height], # 0.5*H = y축 방향의 주점
+#             [0, 0, 1]])
 
-data_loader = Rays_DATALOADER(batch_size, height, width, intrinsic, poses, i_val, images).data_loader()
+# samples = Rays_DATASET(height, width, intrinsic, poses, i_val, images, near=1.0, ndc_space=True, train=True)
 
-rays = None
-for idx, samples in enumerate(data_loader):
-    rays = samples
-    break
+# data_loader = Rays_DATALOADER(batch_size, height, width, intrinsic, poses, i_val, images).data_loader()
 
-z_vals = torch.ones([1024, 64])
-weights = torch.rand(size=[1024, 64])
-# print(z_vals.shape, weights.shape) # [1024, 64], [1024, 64]
+# rays = None
+# for idx, samples in enumerate(data_loader):
+#     rays = samples
+#     break
+
+# z_vals = torch.ones([1024, 64])
+# weights = torch.rand(size=[1024, 64])
+# # print(z_vals.shape, weights.shape) # [1024, 64], [1024, 64]
 
 # Stratified sampling
 # in Dataloader -> rays = rays_o + rays_d + rays_rgb -> [1024, 3, 3] = [1024, 1, 3] + [1024, 2, 3] + [1024, 3, 3]
@@ -47,7 +48,7 @@ weights = torch.rand(size=[1024, 64])
 # t_vals -> 0~1을 sample_num 개수만큼 동일한 간격으로 나눈다.
 # *****Stratified sampling 수식 이해*****
 class Stratified_Sampling(object):
-    def __init__(self, rays, batch_size, sample_num, near, far):
+    def __init__(self, rays, batch_size, sample_num, near, far, device):
         self.rays = rays # Rays_Dataloader에서 받아온 rays -> [1024, 3, 3]
         self.rays_o = self.rays[:,0:1,:]
         self.rays_d = self.rays[:,1:2,:]
@@ -56,6 +57,7 @@ class Stratified_Sampling(object):
         self.sample_num = sample_num
         self.near = torch.tensor(near) # 0 -> scalar
         self.far = torch.tensor(far) # 1 -> scalar
+        self.device = device
         self.z_sampling()
         # self.outputs()
         
@@ -78,6 +80,9 @@ class Stratified_Sampling(object):
         # print(self.z_vals.shape) # [1024, 64]
         
     def outputs(self):
+        self.rays_o = self.rays_o.to(self.device)
+        self.rays_d = self.rays_d.to(self.device)
+        self.z_vals = self.z_vals.to(self.device)
         pts = self.rays_o + self.rays_d * self.z_vals[:,:,None]
         pts = pts.reshape(-1, 3)
         z_vals = self.z_vals
@@ -85,7 +90,7 @@ class Stratified_Sampling(object):
 
 # print(rays.shape) # [1024, 3, 3]
 
-pts, z_vals = Stratified_Sampling(rays, batch_size, sample_num, near, far).outputs()
+# pts, z_vals = Stratified_Sampling(rays, batch_size, sample_num, near, far).outputs()
 # print(pts.shape) # [1024, 64, 3] = [65536, 3]
 
 def viewing_directions(rays):
@@ -94,7 +99,7 @@ def viewing_directions(rays):
     # print(dirs.shape)
     return dirs
 
-dirs = viewing_directions(rays)
+# dirs = viewing_directions(rays)
 # print(dirs.shape) # [1024, 3]
 
 # Positional Encoding
@@ -116,13 +121,13 @@ class Positional_Encoding(object): # shuffle x
         # print(freq_arr.shape) # [65536, 63]
         return freq_arr
     
-pts = Positional_Encoding(10).outputs(pts)
+# pts = Positional_Encoding(10).outputs(pts)
 
 # Hierarchical sampling -> sample_num = 64
 # *****Hierarchical sampling 과정 이해*****
 # input -> Stratified sampling을 통해 얻은 z_vals와 weights
 class Hierarchical_Sampling(object):
-    def __init__(self, rays, z_vals, weights, batch_size, sample_num): # z_vals -> [1024, 64], weights -> [1024, 64]
+    def __init__(self, rays, z_vals, weights, batch_size, sample_num, device): # z_vals -> [1024, 64], weights -> [1024, 64]
         self.rays = rays # [1024, 3, 3] = [1024, 1, 3](rays_o) + [1024, 2, 3](rays_d) + [1024, 3, 3](rays_rgb)
         self.rays_o = self.rays[:,0:1,:]
         self.rays_d = self.rays[:,1:2,:]
@@ -131,6 +136,7 @@ class Hierarchical_Sampling(object):
         self.weights = weights
         self.batch_size = batch_size
         self.sample_num = sample_num # fine sampling -> 64
+        self.device = device
         self.z_fine_sampling()
     def z_fine_sampling(self):
         # input -> Stratified sampling을 통해 추출한 z_vals와 weights
@@ -163,6 +169,8 @@ class Hierarchical_Sampling(object):
         # cdf_g -> inds에 대하여 indexing
         # bins_g -> inds에 대하여 indexing
         # indexing
+        cdf = cdf.to(self.device)
+        u = u.to(self.device)
         idx = torch.searchsorted(sorted_sequence=cdf, input=u, right=True)
         # print(idx.shape) # [1024, 64]
         below = torch.max(torch.zeros_like(idx-1), idx-1) # below = idx - 1
@@ -191,9 +199,10 @@ class Hierarchical_Sampling(object):
         z_vals = torch.cat([self.z_vals, self.z_fine_vals], dim=-1) # [1024, 128]
         z_vals, _ = torch.sort(z_vals, dim=-1)
         fine_pts = self.rays_o + self.rays_d * z_vals[:,:,None]
-        return fine_pts # [1024, 64+64, 3]
+        fine_z_vals = z_vals
+        return fine_pts, fine_z_vals # [1024, 64+64, 3]
 
-fine_pts = Hierarchical_Sampling(rays, z_vals, weights, batch_size, sample_num).outputs()
+# fine_pts = Hierarchical_Sampling(rays, z_vals, weights, batch_size, sample_num).outputs()
 # print(fine_pts.shape) # [1024, 128, 3]
 
 # input -> [65536, 90] = [1024 x 64, 20 x 3 + 3(position) + 8 x 3 + 3(direction)]
@@ -203,8 +212,9 @@ fine_pts = Hierarchical_Sampling(rays, z_vals, weights, batch_size, sample_num).
 
 # input_channel = 3 / output_channel = 4
 # *****Viewing direction -> optional하게 만들기*****
+# model -> sample_num 따로 빼기 or forward() -> Coarse or Fine option
 class NeRF(nn.Module):
-    def __init__(self, pts_channel, output_channel, dir_channel, batch_size, sample_num):
+    def __init__(self, pts_channel, output_channel, dir_channel, batch_size, sample_num, device):
         super(NeRF, self).__init__()
         self.pts_channel = pts_channel # [x, y, z] points
         self.output_channel = output_channel
@@ -214,6 +224,7 @@ class NeRF(nn.Module):
         
         self.batch_size = batch_size # 1024
         self.sample_num = sample_num # 64
+        self.device = device
         
         # forward에서 쓰일 함수들
         self.density_outputs = nn.Linear(self.hidden_channel, 1)
@@ -257,46 +268,86 @@ class NeRF(nn.Module):
         # output -> 3 channel의 rgb
         self.rgb_block = nn.Sequential(*self.rgb_list)
         
-    def forward(self, x): # x -> [1024x64, 90]
-        # positional encoding -> [1024x64, 90] = [1024x64, 63](pts) + [1024x64, 27](viewing_dirs)
-        x = torch.Tensor(x)
-        # pts, dirs -> input x를 split한다.
-        pts = x[:,:self.pts_channel]
-        dirs = x[:,self.pts_channel:self.pts_channel+self.dir_channel]
-        # print(pts.shape) # [65536, 63]
-        # print(dirs.shape) # [65536, 27]
-        # output -> channel 1의 density + channel 3의 rgb
+        # batch에 연연하지 않는 방법 -> model의 forward 안의 self.batch_size를 x.shape[0]으로 바꾸는 방법이 있다.
+    def forward(self, x, sampling): # Coarse : x -> [1024x64, 90], Fine : x -> [1024x128, 90] 
+        if str(sampling).lower() == 'coarse':
+            self.sample_num = 64
+            # positional encoding -> [1024x64, 90] = [1024x64, 63](pts) + [1024x64, 27](viewing_dirs)
+            x = torch.Tensor(x)
+            x = x.to(self.device)
+            # pts, dirs -> input x를 split한다.
+            pts = x[:,:self.pts_channel]
+            dirs = x[:,self.pts_channel:self.pts_channel+self.dir_channel]
+            # print(pts.shape) # [65536, 63]
+            # print(dirs.shape) # [65536, 27]
+            # output -> channel 1의 density + channel 3의 rgb
+            # Tensor 형식으로 -> numpy 대신 torch
+            # residual_block을 거쳐 256 channel의 feature vector를 추출한다.
+            feature = self.residual_block(pts)
+            # 256 channel의 feature vector와 3 channel의 pts를 concatenate한다.
+            # print(feature.shape) # [65536, 256]
+            feature = torch.cat([feature, pts], dim=1)
+            # print(feature.shape) # [65536, 319]
+            feature2 = self.density_block(feature)
+            # print(feature2.shape) # [65536, 256]
+            # feature2에서 하나의 layer를 더 거쳐서 feature vector와 1 channel의 density를 얻어내야 한다.
+            density_outputs = self.density_outputs(feature2)
+            feature_outputs = self.feature_outputs(feature2)
+            # print(density_outputs.shape) # [65536, 1]
 
-        # Tensor 형식으로 -> numpy 대신 torch
-        # residual_block을 거쳐 256 channel의 feature vector를 추출한다.
-        feature = self.residual_block(pts) # linear
-        # 256 channel의 feature vector와 3 channel의 pts를 concatenate한다.
-        # print(feature.shape) # [65536, 256]
-        feature = torch.cat([feature, pts], dim=1)
-        # print(feature.shape) # [65536, 319]
-        feature2 = self.density_block(feature)
-        # print(feature2.shape) # [65536, 256]
-        # feature2에서 하나의 layer를 더 거쳐서 feature vector와 1 channel의 density를 얻어내야 한다.
-        density_outputs = self.density_outputs(feature2)
-        feature_outputs = self.feature_outputs(feature2)
-        # print(density_outputs.shape) # [65536, 1]
-
-        # feature_outputs과 dirs를 concatenate한다. -> rgb layer에 집어 넣는다.
-        feature3 = torch.cat([feature_outputs, dirs], dim=1)
-        # print(feature3.shape) # [65536, 283]
-        feature4 = self.rgb_block(feature3)
-        # print(feature4.shape) # [65536, 128]
-        rgb_outputs = self.rgb_outputs(feature4)
-        # print(rgb_outputs.shape) # [65536, 3]
-        # density_outputs과 rgb_outputs을 concatenate
-        
-        outputs = torch.cat([rgb_outputs, density_outputs], dim=1)
-        # print(outputs.shape) # [65536, 4]
-        outputs = outputs.reshape([self.batch_size, self.sample_num, -1])
+            # feature_outputs과 dirs를 concatenate한다. -> rgb layer에 집어 넣는다.
+            feature3 = torch.cat([feature_outputs, dirs], dim=1)
+            # print(feature3.shape) # [65536, 283]
+            feature4 = self.rgb_block(feature3)
+            # print(feature4.shape) # [65536, 128]
+            rgb_outputs = self.rgb_outputs(feature4)
+            # print(rgb_outputs.shape) # [65536, 3]
+            # density_outputs과 rgb_outputs를 concatenate
+            outputs = torch.cat([rgb_outputs, density_outputs], dim=1)
+            # print(outputs.shape) # [65536, 4]
+            outputs = outputs.reshape([x.shape[0] // self.sample_num, self.sample_num, self.output_channel]) # [1024, ]
+            
+        elif str(sampling).lower() == 'fine':
+            self.sample_num = 128 # 64 x 2 = 128
+            # positional encoding -> [1024x64, 90] = [1024x64, 63](pts) + [1024x64, 27](viewing_dirs)
+            x = torch.Tensor(x)
+            x = x.to(self.device)
+            # pts, dirs -> input x를 split한다.
+            pts = x[:,:self.pts_channel]
+            dirs = x[:,self.pts_channel:self.pts_channel+self.dir_channel]
+            # print(pts.shape) # [65536, 63]
+            # print(dirs.shape) # [65536, 27]
+            # output -> channel 1의 density + channel 3의 rgb
+            # Tensor 형식으로 -> numpy 대신 torch
+            # residual_block을 거쳐 256 channel의 feature vector를 추출한다.
+            feature = self.residual_block(pts)
+            # 256 channel의 feature vector와 3 channel의 pts를 concatenate한다.
+            # print(feature.shape) # [65536, 256]
+            feature = torch.cat([feature, pts], dim=1)
+            # print(feature.shape) # [65536, 319]
+            feature2 = self.density_block(feature)
+            # print(feature2.shape) # [65536, 256]
+            # feature2에서 하나의 layer를 더 거쳐서 feature vector와 1 channel의 density를 얻어내야 한다.
+            density_outputs = self.density_outputs(feature2)
+            feature_outputs = self.feature_outputs(feature2)
+            # print(density_outputs.shape) # [65536, 1]
+            
+            # feature_outputs과 dirs를 concatenate한다. -> rgb layer에 집어 넣는다.
+            feature3 = torch.cat([feature_outputs, dirs], dim=1)
+            # print(feature3.shape) # [65536, 283]
+            feature4 = self.rgb_block(feature3)
+            # print(feature4.shape) # [65536, 128]
+            rgb_outputs = self.rgb_outputs(feature4)
+            # print(rgb_outputs.shape) # [65536, 3]
+            # density_outputs과 rgb_outputs를 concatenate
+            outputs = torch.cat([rgb_outputs, density_outputs], dim=1)
+            # print(outputs.shape) # [65536, 4]
+            outputs = outputs.reshape([x.shape[0] // self.sample_num, self.sample_num, -1]) # [1024, 128, 3]
+            
         return outputs
-    
-model = NeRF(pts_channel, output_channel, dir_channel, batch_size, sample_num)
-x = np.ones((65536, 90))
-# print(x.shape)
-outputs = model(x)
-# print(outputs.shape) # [1024, 64, 4]
+# device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+# model = NeRF(pts_channel, output_channel, dir_channel, batch_size, sample_num, device).to(device)
+# x = np.ones((65536*2, 90))
+# # print(x.shape)
+# outputs = model(x, sampling='fine')
+# # print(outputs.shape) # [1024, 64, 4] -> coarse / [1024, 128, 4] -> fine # debugging

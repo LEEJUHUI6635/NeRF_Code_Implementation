@@ -9,9 +9,9 @@ import cv2 as cv
 
 # LLFF Dataloader -> 각 이미지에 해당하는 batch ray들을 dataloader로 구성한다. batch size를 결정하고, shuffle 한다.
 # rays를 배치화
-base_dir = './data/nerf_llff_data/fern'
-factor = 8 # image_height, image_width, focal_length
-batch_size = 1024 # 한 번에 1024개의 ray를 학습한다.
+# base_dir = './data/nerf_llff_data/fern'
+# factor = 8 # image_height, image_width, focal_length
+# batch_size = 1024 # 한 번에 1024개의 ray를 학습한다.
 
 def normalize(x):
     return x / np.linalg.norm(x)
@@ -208,17 +208,17 @@ class LLFF(object):
         i_val = self.i_val
         return images, poses, bds, render_poses, i_val
 
-images, poses, bds, render_poses, i_val = LLFF(base_dir, factor).outputs()
-# print(i_val) # 12
-
-height = 3024 // factor
-width = 4032 // factor
-focal = 3260.526333 // factor
-# K = [3, 3] -> K[0][2] = 0.5*W, K[0][0] = focal, K[1][2] = 0.5*H, K[1][1] = focal
-intrinsic = np.array([
-            [focal, 0, 0.5*width], # 0.5*W = x축 방향의 주점
-            [0, focal, 0.5*height], # 0.5*H = y축 방향의 주점
-            [0, 0, 1]])
+# images, poses, bds, render_poses, i_val = LLFF(base_dir, factor).outputs()
+# # print(i_val) # 12
+# # print(poses.shape, render_poses.shape) # [20, 3, 5] / [120, 3, 5]
+# height = 3024 // factor
+# width = 4032 // factor
+# focal = 3260.526333 // factor
+# # K = [3, 3] -> K[0][2] = 0.5*W, K[0][0] = focal, K[1][2] = 0.5*H, K[1][1] = focal
+# intrinsic = np.array([
+#             [focal, 0, 0.5*width], # 0.5*W = x축 방향의 주점
+#             [0, focal, 0.5*height], # 0.5*H = y축 방향의 주점
+#             [0, 0, 1]])
 # print('focal : ', focal) # 407.0
 ##################################################
 ##################################################
@@ -231,56 +231,72 @@ intrinsic = np.array([
 
 # Dataloader -> rays_o, rays_d + NDC space(optional)
 # 고민 : render_poses는 어떻게 처리하지?
+# i_val과 images는 test할 때에는 딱히 필요하지 않다. -> *****Validation mode의 Rays_DATASET을 만들 것*****
+# test == True -> train mode 무시 (train == True -> train mode / train == False -> validation mode)
 class Rays_DATASET(Dataset):
-    def __init__(self, height, width, intrinsic, poses, i_val, images, near=1.0, ndc_space=True, train=True): # pose -> [20, 3, 5]
+    def __init__(self, height, width, intrinsic, poses, i_val, images, near=1.0, ndc_space=True, test = True, train=True): # pose -> [20, 3, 5]
         super(Rays_DATASET, self).__init__()
         self.height = height
         self.width = width
         self.intrinsic = intrinsic
-        self.pose = poses[:,:,:4]
+        self.pose = poses[:,:,:4] # [?, 3, 4]
         self.i_val = i_val
         self.images = images
         self.near = near
         self.ndc_space = ndc_space
+        self.test = test
         self.train = train
-                    
-        self.image_num = self.pose.shape[0] # train or test
+        
+        # print(self.pose.shape, poses.shape) # [120, 3, 4] [120, 3, 5]
+        
+        if test == False:
+            self.image_num = self.pose.shape[0] # train or test
+            
         self.focal = self.intrinsic[0][0]
         
-        total_image = self.pose.shape[0] # 전체 이미지 20개
+        if test == False:
+            total_image = self.pose.shape[0] # 전체 이미지 20개
         # print(total_image) # 20
         # optional
-        if self.ndc_space == False:
-            self.all_rays()
-        elif self.ndc_space == True:
-            self.ndc_all_rays()
+        if test == True:
+            if self.ndc_space == False:
+                self.test_all_rays()
+            elif self.ndc_space == True:
+                self.test_ndc_all_rays()
+        elif test == False: # test == True인 경우, rays_o와 rays_d만을 엮어서 가져오면 된다.
+            if self.ndc_space == False:
+                self.all_rays()
+            elif self.ndc_space == True:
+                self.ndc_all_rays()
         
-        # val_idx -> 0, 12
-        train_idx = []
-        test_idx = []
-        for i in range(total_image):
-            if i % self.i_val == 0:
-                test_idx.append(i)
-            else:
-                train_idx.append(i)
+        if test == False:
+            # val_idx -> 0, 12
+            train_idx = []
+            test_idx = []
+            for i in range(total_image):
+                if i % self.i_val == 0:
+                    test_idx.append(i)
+                else:
+                    train_idx.append(i)
         # print(train_idx) # [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 14, 15, 16, 17, 18, 19]
         # print(test_idx) # [0, 12]
         # print(self.pose.shape) # [20, 3, 4]
         # print(self.images.shape) # [20, 378, 504, 3]
         # Dataset split : validation -> 0, 12
-        if self.train == True:
-            # test_idx만 제거하면 된다.
-            self.pose = self.pose[train_idx,:,:]
-            self.images = self.images[train_idx,:,:,:]
-        elif self.train == False:
-            # test_idx만 넣으면 된다.
-            self.pose = self.pose[test_idx,:,:]
-            self.images = self.images[test_idx,:,:,:]
-        
+        if test == False:
+            if self.train == True:
+                # test_idx만 제거하면 된다.
+                self.pose = self.pose[train_idx,:,:]
+                self.images = self.images[train_idx,:,:,:]
+            elif self.train == False:
+                # test_idx만 넣으면 된다.
+                self.pose = self.pose[test_idx,:,:]
+                self.images = self.images[test_idx,:,:,:]
+            
         # print(self.pose.shape) # [18, 3, 4]
         # print(self.images.shape) # [18, 378, 504, 3]
-        
-        self.image_num = self.pose.shape[0] # train or test
+        if test == False:
+            self.image_num = self.pose.shape[0] # train or test
         # print(self.image_num)
         
     # 하나의 image에 대한 camera to world -> rays_o는 image마다 다르기 때문
@@ -362,7 +378,7 @@ class Rays_DATASET(Dataset):
         rays_list = []
         # print(self.image_num)
         for i in range(self.image_num):
-            rays_o, rays_d = self.get_rays(poses[i,:3,:4])
+            rays_o, rays_d = self.get_rays(self.pose[i,:3,:4])
             rays = self.ndc_rays(self.near, self.focal, rays_o, rays_d)
             # print(rays.shape) # [2, 3, 378, 504]
             rays = np.moveaxis(rays, source=1, destination=-1)
@@ -374,40 +390,93 @@ class Rays_DATASET(Dataset):
         rays_rgb_arr = np.concatenate([rays_arr, self.images[:,np.newaxis,...]], axis=1)
         # print(self.rays_rgb_arr.shape) # [20, 3, 378, 504, 3]
         rays_rgb_arr = np.moveaxis(rays_rgb_arr, source=1, destination=3)
-        # print(self.rays_rgb_arr.shape) # [20, 378, 504, 3, 3]
+        # print(self.rays_rgb_arr.shape) # [20, 378, 504, 3, 3] = [image num, image height, image width, rays_o + rays_d + rays_rgb]
         rays_rgb_arr = rays_rgb_arr.reshape(-1, 3, 3)
         # print(rays_rgb_arr.shape) # [3810240, 3, 3]
         self.rays_rgb_list = [rays_rgb_arr[i,:,:] for i in range(rays_rgb_arr.shape[0])]
         # print(len(self.rays_rgb_list)) # 3810240
+    
+    def test_all_rays(self): # NDC_space = False
+        # test mode -> rays_o + rays_d 만 가져오면 된다.
+        # rays + rgb -> [2, 378, 504, 3(x, y, -1)]
+        # get_rays -> rays_o + rays_d
+        rays = np.stack([np.stack(self.get_rays(poses), axis=0) for poses in self.pose[:,:3,:4]], axis=0)
+        # print(rays.shape) # [120, 2, 378, 504, 3]
+        rays = np.moveaxis(rays, source=1, destination=3)
+        # print(rays.shape) # [120, 378, 504, 2, 3]
+        rays = rays.reshape([-1, 2, 3])
+        # print(rays.shape) # [22861440, 2, 3]
+        self.rays = rays.astype(np.float32)
+        self.rays_rgb_list = np.split(self.rays, self.rays.shape[0], axis=0)
+        # print(self.rays_rgb_list[0].shape) # [1, 2, 3]
+        self.rays_rgb_list = [self.rays_rgb_list[i].reshape(2, 3) for i in range(len(self.rays_rgb_list))]
+        
+    def test_ndc_all_rays(self):
+        rays_list = []
+        # print(self.image_num)
+        for i in range(self.pose.shape[0]): # pose의 개수만큼
+            rays_o, rays_d = self.get_rays(self.pose[i,:3,:4])
+            rays = self.ndc_rays(self.near, self.focal, rays_o, rays_d)
+            # print(rays.shape) # [2, 3, 378, 504]
+            rays = np.moveaxis(rays, source=1, destination=-1)
+            # print(rays.shape) # [2, 378, 504, 3]
+            rays_list.append(rays)
+        
+        rays_arr = np.array(rays_list)
+        # print(rays_arr.shape) # [20, 2, 378, 504, 3]
+        # print(self.images.shape) # [20, 378, 504, 3]
+        
+        rays_arr = np.moveaxis(rays_arr, source=1, destination=3)
+        # print(self.rays_rgb_arr.shape) # [20, 378, 504, 3, 3] = [image num, image height, image width, rays_o + rays_d + rays_rgb]
+        
+        rays_arr = rays_arr.reshape(-1, 2, 3)
+        # print(rays_rgb_arr.shape) # [3810240, 3, 3]
+        
+        self.rays_rgb_list = [rays_arr[i,:,:] for i in range(rays_arr.shape[0])]
+        # print(len(self.rays_rgb_list)) # 3810240
         
     def __len__(self): # should be iterable
         return len(self.rays_rgb_list)
-    
+        
     def __getitem__(self, index): # should be iterable
         samples = self.rays_rgb_list[index]
-        # print(samples.shape)
         return samples # rays_o + rays_d + rgb
 
-samples = Rays_DATASET(height, width, intrinsic, poses, i_val, images, near=1.0, ndc_space=True, train=True)
+# Test mode, NDC mode
+# samples = Rays_DATASET(height, width, intrinsic, render_poses, i_val=None, images=None, near=1.0, ndc_space=True, test=True, train=True)
+
+# for idx, samples in enumerate(samples):
+#     # print(idx)
+#     print(samples.shape) # [2, 3]
+#     break
+# near = 1.0
+# ndc_space = True
+# test_JH = True
+# train = True
 
 # Rays DataLoader
 class Rays_DATALOADER(object):
-    def __init__(self, batch_size, height, width, intrinsic, poses, i_val, images):
+    def __init__(self, batch_size, height, width, intrinsic, poses, i_val, images, near, ndc_space, test, train):
         self.height = height
         self.width = width
         self.intrinsic = intrinsic
         self.poses = poses
         self.i_val = i_val
         self.images = images
+        self.near = near
+        self.ndc_space = ndc_space
+        self.test = test
+        self.train = train
         self.batch_size = batch_size
-        self.samples = Rays_DATASET(self.height, self.width, self.intrinsic, self.poses, self.i_val, self.images)
+        self.samples = Rays_DATASET(self.height, self.width, self.intrinsic, self.poses, self.i_val, self.images, self.near, self.ndc_space, self.test, self.train)
         
     def data_loader(self): # shuffle = False
-        dataloader = DataLoader(dataset=self.samples, batch_size=self.batch_size)
+        dataloader = DataLoader(dataset=self.samples, batch_size=self.batch_size, drop_last=False) # drop_last = False -> 마지막 batch 또한 학습한다.
         return dataloader
 
-data_loader = Rays_DATALOADER(batch_size, height, width, intrinsic, poses, i_val, images).data_loader()
+# data_loader = Rays_DATALOADER(height * width, height, width, intrinsic, render_poses, i_val=None, images=None, near=near, ndc_space=ndc_space, test=test_JH, train=train).data_loader()
 
-for idx, samples in enumerate(data_loader):
-    # print(samples.shape) # [1024, 3, 3]
-    break
+# Test mode 
+# for idx, samples in enumerate(data_loader):
+#     print(samples.shape) # [190512, 2, 3]
+#     break
