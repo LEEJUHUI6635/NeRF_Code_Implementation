@@ -2,8 +2,15 @@ from JH_data_loader import LLFF, Rays_DATASET, Rays_DATALOADER
 import numpy as np
 import argparse
 import os
-
+import torch
 from JH_solver import Solver
+import random
+from torch.backends import cudnn
+torch.manual_seed(1234)
+cudnn.deterministic = True
+cudnn.benchmark = True
+np.random.seed(1234)
+random.seed(1234)
 
 # Paser
 parser = argparse.ArgumentParser(description='NeRF Implementation by JH')
@@ -23,6 +30,7 @@ parser.add_argument('--fine_num', type=int, default=64)
 parser.add_argument('--L_pts', type=int, default=10)
 parser.add_argument('--L_dirs', type=int, default=4)
 parser.add_argument('--learning_rate', type=int, default=5e-4)
+parser.add_argument('--sample_num', type=int, default=64)
 
 # save path
 parser.add_argument('--save_model', type=str, default='./models')
@@ -40,25 +48,23 @@ height = images.shape[1]
 width = images.shape[2]
 # print(height, width) # 378, 504
 # print(poses.shape) # [20, 3, 5]
-focal = poses[0,2,-1]
+# focal = poses[0,2,-1]
 # print(focal) # 407.0
-# focal = 3260.526333 // factor
+factor = 8
+focal = 3260.526333 / factor
 # print(focal) # 407.0
 intrinsic = np.array([
             [focal, 0, 0.5*width], # 0.5*W = x축 방향의 주점
             [0, focal, 0.5*height], # 0.5*H = y축 방향의 주점
             [0, 0, 1]])
-near = 1.0
+near = 1.
 ndc_space = True
 
-# Dataloader -> rays
 data_loader = Rays_DATALOADER(config.batch_size, height, width, intrinsic, poses, i_val, images, near, ndc_space, False, True).data_loader()
-test_data_loader = Rays_DATALOADER(config.batch_size, height, width, intrinsic, render_poses, None, None, near, ndc_space, True, True).data_loader()
-# 11907 = 504 x 378 / 16
 
 # Train or Test
 # config.mode를 나눌 필요 x -> Train 후의 Test는 진행되어야 하기 때문
 if config.mode == 'Train':
-    Solver(data_loader, test_data_loader, config, i_val).train()
+    Solver(data_loader, None, config, i_val).train()
 # elif config.mode == 'Test':
 #     solver.test()
