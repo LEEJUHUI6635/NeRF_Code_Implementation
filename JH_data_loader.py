@@ -2,7 +2,6 @@ from torch.utils.data import Dataset, DataLoader
 import numpy as np
 import os
 import cv2 as cv
-import sys
 
 def normalize(x):
     return x / np.linalg.norm(x)
