@@ -3,6 +3,8 @@ import numpy as np
 import os
 import cv2 as cv
 
+# Dataloader에서 ***bds_factor = 0.75***
+
 def normalize(x):
     return x / np.linalg.norm(x)
 
@@ -26,10 +28,11 @@ def new_origin(poses): # input -> poses[20, 3, 5], output -> average pose[3, 5]
     new_world = np.concatenate([new_world, hwf], axis=1)
     return new_world
 
-class LLFF(object):
-    def __init__(self, base_dir, factor):
+class LLFF(object): # *** bd_factor를 추가해야 한다. ***
+    def __init__(self, base_dir, factor, bd_factor=0.75):
         self.base_dir = base_dir
         self.factor = factor
+        self.bd_factor = bd_factor # ***
         self.preprocessing() # Test
         self.load_images()
         self.pre_poses() # Test
@@ -42,7 +45,7 @@ class LLFF(object):
         poses = poses_bounds[:,:-2] # depth를 제외한 pose
         self.bds = poses_bounds[:,-2:] # depth
         self.poses = poses.reshape(-1, 3, 5) # [20, 3, 5]
-            
+        
     def load_images(self): # images -> [height, width, 3, image_num] + 255로 나누어 normalize
         # 모든 image를 불러온다.
         image_dir = os.path.join(self.base_dir, 'images')
@@ -57,9 +60,15 @@ class LLFF(object):
             images_list.append(images_resize)
         self.images = np.array(images_list)
     
-    def pre_poses(self):
+    def pre_poses(self): # bds_factor에 대해 rescale을 처리해야 한다.
         # 좌표축 변환, [-u, r, -t] -> [r, u, -t]
+        sc = 1. if self.bd_factor is None else 1./(self.bds.min() * self.bd_factor)
         self.poses = np.concatenate([self.poses[:,:,1:2], -self.poses[:,:,0:1], self.poses[:,:,2:]], axis=-1)
+        
+        # bd_factor로 rescaling
+        self.poses[:,:3,3] *= sc # translation에 해당하는 부분
+        self.bds *= sc
+        
         image_num = self.poses.shape[0]
         # 20개 pose들의 average pose를 구하고, 새로운 world coordinate를 생성한다. -> camera to world coordinate
         new_world = new_origin(self.poses) # 새로운 world coordinate, c2w

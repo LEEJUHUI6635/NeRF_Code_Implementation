@@ -7,9 +7,6 @@ import torch.optim as optim
 import numpy as np
 import cv2 as cv
 import os
-# device : cuda0
-import sys
-from JH_data_loader import Rays_DATASET
 
 # train 할 때에는 random하게 ray를 섞어야 하기 때문에, ray를 합쳐 하나의 image로 만드는 작업 -> 하나의 함수
 # learning rate decay -> iteration이 한 번씩 돌 때마다
@@ -87,15 +84,17 @@ class Solver(object):
         # Coarse + Fine Network
         # 고민 -> 두 개의 network가 아니라 한 개의 network를 학습해야 하는 것이 아닌가? 즉, forward 부분도 하나로 통일해야 gradient가 한 번에 학습되는 것이 아닌가?
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        # self.coarse_model = NeRF(self.pts_channel, self.output_channel, self.dir_channel, self.batch_size, self.sample_num, self.device).to(self.device)
-        self.coarse_model = NeRF().to(self.device)
+        self.coarse_model = NeRF(self.pts_channel, self.output_channel, self.dir_channel, self.batch_size, self.sample_num, self.device).to(self.device)
+        # self.coarse_model = NeRF().to(self.device)
         grad_variables = list(self.coarse_model.parameters())
-        # self.fine_model = NeRF(self.pts_channel, self.output_channel, self.dir_channel, self.batch_size, self.sample_num, self.device).to(self.device)
-        self.fine_model = NeRF().to(self.device)
+        self.fine_model = NeRF(self.pts_channel, self.output_channel, self.dir_channel, self.batch_size, self.sample_num, self.device).to(self.device)
+        # self.fine_model = NeRF().to(self.device)
         grad_variables += list(self.fine_model.parameters())
         
         # optimizer
         self.optimizer = optim.Adam(params=grad_variables, lr=self.learning_rate, betas=(0.9, 0.999))
+        # learning rate decay를 실행시키기 위해서는 self.learning_rate가 self.optimizer에 반영되어야 한다. 하지만, 위 함수는 한 번만 정의되기 때문에, 새로운 learning rate를 반영하지 못할 것이다.
+        # check -> optimizer를 출력해보면 된다.
         
         # loss function
         self.criterion = lambda x, y : torch.mean((x - y) ** 2)
@@ -155,7 +154,7 @@ class Solver(object):
                 rays_o = rays[:,0,:]
                 rays_d = rays[:,1,:]
                 rays_rgb = rays[:,2,:] # True
-                
+
                 # Stratified Sampling -> rays_o + rays_d -> view_dirs x
                 pts, z_vals = Stratified_Sampling(rays_o, rays_d, batch_size, self.sample_num, self.near, self.far, self.device).outputs()
                 pts = pts.reshape(batch_size, self.coarse_num, 3) # sample_num, [1024, 64, 3]
@@ -173,8 +172,8 @@ class Solver(object):
                 inputs = inputs.to(self.device)
                 
                 # Coarse Network
-                # outputs = self.coarse_model(inputs, sampling='coarse')
-                outputs = self.coarse_model(inputs)
+                outputs = self.coarse_model(inputs, sampling='coarse')
+                # outputs = self.coarse_model(inputs)
                 outputs = outputs.reshape(batch_size, self.coarse_num, 4)
                 rgb_2d, weights = self.classic_volume_rendering(outputs, z_vals, rays, self.device)
                 
@@ -195,8 +194,8 @@ class Solver(object):
                 fine_inputs = fine_inputs.to(self.device)
                 
                 # Fine model
-                # fine_outputs = self.fine_model(fine_inputs, sampling='fine')
-                fine_outputs = self.fine_model(fine_inputs)
+                fine_outputs = self.fine_model(fine_inputs, sampling='fine')
+                # fine_outputs = self.fine_model(fine_inputs)
                 fine_outputs = fine_outputs.reshape(rays.shape[0], 128, 4)
 
                 # classic volume rendering
@@ -212,12 +211,16 @@ class Solver(object):
                 self.optimizer.step()
 
                 # print(rays.shape) # [1024, 3, 3] 
-                print(idx, loss, self.learning_rate)
+                print(idx, loss)
             
-            # 5 epoch에 도달했을 때, learning rate를 줄인다. 5e-4 -> e-4
-            if epoch % 5 == 0 and epoch > 0:
-                self.learning_rate = self.learning_rate / 5
-                
+            # Learning rate decay -> self.optimizer에도 적용되어야 한다.
+            # epoch마다
+            decay_rate = 0.1
+            decay_steps = 250 * 1000
+            new_lrate = self.learning_rate * (decay_rate ** (epoch / decay_steps))
+            for param_group in self.optimizer.param_groups:
+                param_group['lr'] = new_lrate
+            
     # # *****net_chunk*****
     # def train(self): # device -> dataset, model
     #     for epoch in range(self.nb_epochs):
@@ -314,9 +317,9 @@ class Solver(object):
                 # new_lrate = self.learning_rate * (decay_rate ** ((idx + epoch * 3348)/decay_steps))
                 # self.learning_rate = new_lrate
 
-            if epoch % 5 == 0 and epoch > 0: # Fine model + Coarse model 모두 저장
-                Save_Checkpoints(epoch, self.coarse_model, self.optimizer, loss, self.save_coarse_path, 'epoch')
-                Save_Checkpoints(epoch, self.fine_model, self.optimizer, loss, self.save_fine_path, 'epoch')
+            # if epoch % 5 == 0 and epoch > 0: # Fine model + Coarse model 모두 저장
+            #     Save_Checkpoints(epoch, self.coarse_model, self.optimizer, loss, self.save_coarse_path, 'epoch')
+            #     Save_Checkpoints(epoch, self.fine_model, self.optimizer, loss, self.save_fine_path, 'epoch')
 
             # Validation -> Validataion Dataloader = rays + NDC space 전에 추출한 get_rays의 view_dirs -> Train과 똑같이 처리한다. 다만, rays_rgb는 가져올 필요 없다.
             if epoch % 1 == 0: # if epoch % 10 == 0 and epoch > 0:
@@ -347,8 +350,8 @@ class Solver(object):
                         inputs = inputs.to(self.device)
                         
                         # Coarse Network
-                        # outputs = self.coarse_model(inputs, sampling='coarse')
-                        outputs = self.coarse_model(inputs)
+                        outputs = self.coarse_model(inputs, sampling='coarse')
+                        # outputs = self.coarse_model(inputs)
                         outputs = outputs.reshape(batch_size, self.coarse_num, 4)
                         rgb_2d, weights = self.classic_volume_rendering(outputs, z_vals, rays, self.device)
                         
@@ -369,8 +372,8 @@ class Solver(object):
                         fine_inputs = fine_inputs.to(self.device)
                         
                         # Fine model
-                        # fine_outputs = self.fine_model(fine_inputs, sampling='fine')
-                        fine_outputs = self.fine_model(fine_inputs)
+                        fine_outputs = self.fine_model(fine_inputs, sampling='fine')
+                        # fine_outputs = self.fine_model(fine_inputs)
                         fine_outputs = fine_outputs.reshape(rays.shape[0], 128, 4)
 
                         # classic volume rendering
@@ -386,4 +389,4 @@ class Solver(object):
                     for i in range(2):
                         image = val_image_arr[i,:,:,:]
                         # cv.imwrite('./results/test/2_{}_{}.png'.format(epoch, i), image)
-                        cv.imwrite('./results/test4/{}_{}.png'.format(epoch, i), image)
+                        cv.imwrite('./results/test5/{}_{}.png'.format(epoch, i), image)
