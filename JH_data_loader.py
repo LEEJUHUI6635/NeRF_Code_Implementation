@@ -313,7 +313,7 @@ class Rays_DATASET(Dataset):
         return results
 
 class Rays_DATALOADER(object):
-    def __init__(self, batch_size, height, width, intrinsic, poses, i_val, images, near, ndc_space, test, train):
+    def __init__(self, batch_size, height, width, intrinsic, poses, i_val, images, near, ndc_space, test, train, shuffle, drop_last):
         self.height = height
         self.width = width
         self.intrinsic = intrinsic
@@ -326,7 +326,9 @@ class Rays_DATALOADER(object):
         self.train = train
         self.batch_size = batch_size
         self.results = Rays_DATASET(self.height, self.width, self.intrinsic, self.poses, self.i_val, self.images, self.near, self.ndc_space, self.test, self.train)
+        self.shuffle = shuffle # 나중에 train이면 shuffle = True / validation 혹은 test이면 shuffle = False 되게끔 만들기 !
+        self.drop_last = drop_last # 나중에 train이면 drop_last = True / validation 혹은 test이면 drop_last = False 되게끔 만들기 !
         
     def data_loader(self): # shuffle = False
-        dataloader = DataLoader(dataset=self.results, batch_size=self.batch_size, drop_last=False) # drop_last = False -> 마지막 batch 또한 학습한다.
+        dataloader = DataLoader(dataset=self.results, batch_size=self.batch_size, shuffle = self.shuffle, drop_last=False) # drop_last = False -> 마지막 batch 또한 학습한다.
         return dataloader

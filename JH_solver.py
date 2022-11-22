@@ -9,6 +9,11 @@ import cv2 as cv
 import os
 # device : cuda0
 import sys
+from JH_data_loader import Rays_DATASET
+
+# train 할 때에는 random하게 ray를 섞어야 하기 때문에, ray를 합쳐 하나의 image로 만드는 작업 -> 하나의 함수
+# learning rate decay -> iteration이 한 번씩 돌 때마다
+
 # Checkpoints 저장 -> epoch 마다 저장 or 마지막 epoch만 저장
 class Save_Checkpoints(object):
     def __init__(self, epoch, model, optimizer, loss, save_path, select='epoch'): # select -> epoch or last
@@ -43,6 +48,7 @@ class Solver(object):
         # iterations
         self.resume_iters = config.resume_iters
         self.nb_epochs = config.nb_epochs
+        self.nb_iters = config.nb_iters
         
         self.batch_size = config.batch_size
         self.coarse_num = config.coarse_num # 64
@@ -120,11 +126,29 @@ class Solver(object):
 
         rgb_2d = torch.sum(weights[...,None] * rgb_3d, dim=-2)
         return rgb_2d, weights
-
+    
+    # *****net_chunk*****
     def train(self): # device -> dataset, model
+        # self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        # # self.coarse_model = NeRF(self.pts_channel, self.output_channel, self.dir_channel, self.batch_size, self.sample_num, self.device).to(self.device)
+        # coarse_model = NeRF().to(self.device)
+        # grad_variables = list(coarse_model.parameters())
+        # # self.fine_model = NeRF(self.pts_channel, self.output_channel, self.dir_channel, self.batch_size, self.sample_num, self.device).to(self.device)
+        # fine_model = NeRF().to(self.device)
+        # grad_variables += list(fine_model.parameters())
+        
+        # # optimizer
+        # optimizer = optim.Adam(params=grad_variables, lr=self.learning_rate, betas=(0.9, 0.999))
+        
+        # # loss function
+        # criterion = lambda x, y : torch.mean((x - y) ** 2)
+        
         for epoch in range(self.nb_epochs):
+            # Dataloader -> 1024로 나눠 학습
             self.train_image_list = []
             for idx, [rays, view_dirs] in enumerate(self.data_loader): # Dataloader -> rays = rays_o + rays_d + rays_rgb / view_dirs
+                rays = rays.float()
+                view_dirs = view_dirs.float()
                 batch_size = rays.shape[0]
                 # view_dirs -> NDC 처리 전의 get_rays로부터
                 view_dirs = viewing_directions(view_dirs) # [1024, 3]
@@ -134,9 +158,9 @@ class Solver(object):
                 
                 # Stratified Sampling -> rays_o + rays_d -> view_dirs x
                 pts, z_vals = Stratified_Sampling(rays_o, rays_d, batch_size, self.sample_num, self.near, self.far, self.device).outputs()
-                pts = pts.reshape(batch_size, self.coarse_num, 3) # sample_num
+                pts = pts.reshape(batch_size, self.coarse_num, 3) # sample_num, [1024, 64, 3]
                 coarse_view_dirs = view_dirs[:,None].expand(pts.shape) # [1024, 64, 3]
-                pts = pts.reshape(-1, 3)
+                pts = pts.reshape(-1, 3) # [65536, 3]
                 coarse_view_dirs = coarse_view_dirs.reshape(-1, 3)
                 
                 # Positional Encoding
@@ -181,27 +205,114 @@ class Solver(object):
                 rgb_2d = rgb_2d.to(self.device)
                 rays_rgb = rays_rgb.to(self.device)
                 loss = self.criterion(fine_rgb_2d, rays_rgb) + self.criterion(rgb_2d, rays_rgb) # Coarse + Fine
-
+                
                 # optimizer
                 self.optimizer.zero_grad()
                 loss.backward()
                 self.optimizer.step()
 
                 # print(rays.shape) # [1024, 3, 3] 
-                print(idx, loss)
+                print(idx, loss, self.learning_rate)
+            
+            # 5 epoch에 도달했을 때, learning rate를 줄인다. 5e-4 -> e-4
+            if epoch % 5 == 0 and epoch > 0:
+                self.learning_rate = self.learning_rate / 5
                 
+    # # *****net_chunk*****
+    # def train(self): # device -> dataset, model
+    #     for epoch in range(self.nb_epochs):
+    #         # Dataloader -> 1024로 나눠 학습
+    #         self.train_image_list = []
+    #         for idx, [rays, view_dirs] in enumerate(self.data_loader): # Dataloader -> rays = rays_o + rays_d + rays_rgb / view_dirs
+    #             rays = rays.float()
+    #             view_dirs = view_dirs.float()
+    #             batch_size = rays.shape[0]
+    #             # view_dirs -> NDC 처리 전의 get_rays로부터
+    #             view_dirs = viewing_directions(view_dirs) # [1024, 3]
+    #             rays_o = rays[:,0,:]
+    #             rays_d = rays[:,1,:]
+    #             rays_rgb = rays[:,2,:] # True
+                
+    #             # Stratified Sampling -> rays_o + rays_d -> view_dirs x
+    #             pts, z_vals = Stratified_Sampling(rays_o, rays_d, batch_size, self.sample_num, self.near, self.far, self.device).outputs()
+    #             pts = pts.reshape(batch_size, self.coarse_num, 3) # sample_num, [1024, 64, 3]
+    #             coarse_view_dirs = view_dirs[:,None].expand(pts.shape) # [1024, 64, 3]
+    #             pts = pts.reshape(-1, 3) # [65536, 3]
+    #             coarse_view_dirs = coarse_view_dirs.reshape(-1, 3)
+                
+    #             # Positional Encoding
+    #             coarse_pts = Positional_Encoding(self.L_pts).outputs(pts) # position
+    #             coarse_view_dirs = Positional_Encoding(self.L_dirs).outputs(coarse_view_dirs) # viewing direction
+    #             coarse_pts = coarse_pts.to(self.device)
+    #             coarse_view_dirs = coarse_view_dirs.to(self.device)
+
+    #             inputs = torch.cat([coarse_pts, coarse_view_dirs], dim=-1)
+    #             inputs = inputs.to(self.device)
+                
+    #             # Coarse Network
+    #             # outputs = self.coarse_model(inputs, sampling='coarse')
+    #             outputs = self.coarse_model(inputs)
+    #             outputs = outputs.reshape(batch_size, self.coarse_num, 4)
+    #             rgb_2d, weights = self.classic_volume_rendering(outputs, z_vals, rays, self.device)
+                
+    #             # Hierarchical sampling + viewing_directions
+    #             fine_pts, fine_z_vals = Hierarchical_Sampling(rays, z_vals, weights, batch_size, self.sample_num, self.device).outputs()
+    #             fine_pts = fine_pts.reshape(batch_size, 128, 3) # [1024, 128, 3]
+                
+    #             fine_view_dirs = view_dirs[:,None].expand(fine_pts.shape) # [1024, 128, 3]
+    #             fine_pts = fine_pts.reshape(-1, 3)
+    #             fine_view_dirs = fine_view_dirs.reshape(-1, 3)
+                
+    #             # Positional Encoding
+    #             fine_pts = Positional_Encoding(self.L_pts).outputs(fine_pts)
+    #             fine_view_dirs = Positional_Encoding(self.L_dirs).outputs(fine_view_dirs)
+    #             fine_pts = fine_pts.to(self.device)
+    #             fine_view_dirs = fine_view_dirs.to(self.device)
+    #             fine_inputs = torch.cat([fine_pts, fine_view_dirs], dim=-1)
+    #             fine_inputs = fine_inputs.to(self.device)
+                
+    #             # Fine model
+    #             # fine_outputs = self.fine_model(fine_inputs, sampling='fine')
+    #             fine_outputs = self.fine_model(fine_inputs)
+    #             fine_outputs = fine_outputs.reshape(rays.shape[0], 128, 4)
+
+    #             # classic volume rendering
+    #             fine_rgb_2d, fine_weights = self.classic_volume_rendering(fine_outputs, fine_z_vals, rays, self.device) # z_vals -> Stratified sampling된 후의 z_vals
+    #             fine_rgb_2d = fine_rgb_2d.to(self.device)
+    #             rgb_2d = rgb_2d.to(self.device)
+    #             rays_rgb = rays_rgb.to(self.device)
+    #             loss = self.criterion(fine_rgb_2d, rays_rgb) + self.criterion(rgb_2d, rays_rgb) # Coarse + Fine
+    #             print(loss)
+                
+    #             # optimizer
+    #             self.optimizer.zero_grad()
+    #             loss.backward()
+    #             self.optimizer.step()
+
+    #             # print(rays.shape) # [1024, 3, 3] 
+    #             print(idx, loss)
+                # print(self.learning_rate)
+                
+                # Train image
                 # 하나의 iteration이 끝남 -> 하나의 batch가 쌓여야 한다.
-                fine_rgb_2d = fine_rgb_2d.cpu().detach().numpy()
-                # print(type(rgb_2d))
-                fine_rgb_2d = (255*np.clip(fine_rgb_2d,0,1)).astype(np.uint8)
+                # fine_rgb_2d = fine_rgb_2d.cpu().detach().numpy()
+                # # print(type(rgb_2d))
+                # fine_rgb_2d = (255*np.clip(fine_rgb_2d,0,1)).astype(np.uint8)
 
-                self.train_image_list.append(fine_rgb_2d) # [1024, 3]
+            #     self.train_image_list.append(fine_rgb_2d) # [1024, 3]
 
-            self.train_image_arr = np.concatenate(self.train_image_list, axis=0)
-            self.train_image_arr = self.train_image_arr.reshape(18, 378, 504, 3) # image의 개수
+            # self.train_image_arr = np.concatenate(self.train_image_list, axis=0)
+            # self.train_image_arr = self.train_image_arr.reshape(18, 378, 504, 3) # image의 개수
+            
             # for i in range(5): # 첫 번째 이미지만을 출력
             #     image = self.train_image_arr[i,:,:,:]
             #     cv.imwrite('./data/results/2_JH_sampling_{}_{}.png'.format(epoch, i), image) # debugging
+                
+                # # Learning rate decay
+                # decay_rate = 0.1
+                # decay_steps = 250 * 1000
+                # new_lrate = self.learning_rate * (decay_rate ** ((idx + epoch * 3348)/decay_steps))
+                # self.learning_rate = new_lrate
 
             if epoch % 5 == 0 and epoch > 0: # Fine model + Coarse model 모두 저장
                 Save_Checkpoints(epoch, self.coarse_model, self.optimizer, loss, self.save_coarse_path, 'epoch')
@@ -270,9 +381,9 @@ class Solver(object):
                         fine_rgb_2d = (255*np.clip(fine_rgb_2d,0,1)).astype(np.uint8)
                         val_image_list.append(fine_rgb_2d)
                         
-                    # 하나의 epoch를 끝내고
                     val_image_arr = np.concatenate(val_image_list, axis=0)
                     val_image_arr = val_image_arr.reshape(2, 378, 504, 3)
                     for i in range(2):
                         image = val_image_arr[i,:,:,:]
-                        cv.imwrite('./results/test/{}_{}.png'.format(epoch, i), image)
+                        # cv.imwrite('./results/test/2_{}_{}.png'.format(epoch, i), image)
+                        cv.imwrite('./results/test4/{}_{}.png'.format(epoch, i), image)

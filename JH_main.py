@@ -1,4 +1,4 @@
-from JH_data_loader import LLFF, Rays_DATALOADER
+from JH_data_loader import LLFF, Rays_DATASET, Rays_DATALOADER
 from JH_solver import Solver
 
 import torch
@@ -24,14 +24,16 @@ parser.add_argument('--ndc_space', type=bool, default=True)
 # train
 parser.add_argument('--resume_iters', type=int, default=None)
 parser.add_argument('--mode', type=str, default='Train') # list 형식으로 만들기
-parser.add_argument('--nb_epochs', type=int, default=200000) # 500000
+parser.add_argument('--nb_epochs', type=int, default=60)
+parser.add_argument('--nb_iters', type=int, default=200000)
+
 parser.add_argument('--near', type=int, default=0)
 parser.add_argument('--far', type=int, default=1)
 parser.add_argument('--coarse_num', type=int, default=64)
 parser.add_argument('--fine_num', type=int, default=64)
 parser.add_argument('--L_pts', type=int, default=10)
 parser.add_argument('--L_dirs', type=int, default=4)
-parser.add_argument('--learning_rate', type=int, default=5e-4)
+parser.add_argument('--learning_rate', type=int, default=5e-4) # learning rate = 5e-4
 parser.add_argument('--sample_num', type=int, default=64)
 
 # save path
@@ -71,8 +73,18 @@ intrinsic = np.array([
             [0, focal, 0.5*height], # 0.5*H = y축 방향의 주점
             [0, 0, 1]])
 near = 1.
-data_loader = Rays_DATALOADER(config.batch_size, height, width, intrinsic, poses, i_val, images, near, config.ndc_space, False, True).data_loader() # Train
-val_data_loader = Rays_DATALOADER(config.batch_size, height, width, intrinsic, poses, i_val, images, near, config.ndc_space, False, False).data_loader() # Validation
+
+
+# Rays_DATASET test -> 1개씩 받아와서 1024개씩 합친다.
+# results = Rays_DATASET(height, width, intrinsic, poses, i_val, images, near=1.0, ndc_space=True, test=False, train=True) # pose -> [20, 3, 5] / Test
+# for idx, [samples, viewdirs] in enumerate(results):
+#     print(samples.shape) # [3, 3] = rays_o + rays_d + rays_rgb
+#     print(viewdirs.shape) # [1, 3] = rays_d에 normalization
+#     break
+
+# Train data loader -> shuffle = True / Validation data loader -> shuffle = False
+data_loader = Rays_DATALOADER(config.batch_size, height, width, intrinsic, poses, i_val, images, near, config.ndc_space, False, True, shuffle=True, drop_last=False).data_loader() # Train
+val_data_loader = Rays_DATALOADER(config.batch_size, height, width, intrinsic, poses, i_val, images, near, config.ndc_space, False, False, shuffle=False, drop_last=False).data_loader() # Validation
 # test_data_loader = Rays_DATALOADER(config.batch_size, height, width, intrinsic, render_poses, None, None, near, config.ndc_space, True, False).data_loader() # Test
 
 # Train or Test
