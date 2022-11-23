@@ -165,8 +165,10 @@ class Rays_DATASET(Dataset):
         self.train = train
     
         self.focal = self.intrinsic[0][0]
+
+        self.image_num = self.pose.shape[0] # Train과 Test 모두에 사용된다.
+        
         if self.test == False: # Train or Validation
-            self.image_num = self.pose.shape[0]
             train_idx = []
             val_idx = []
             for i in range(self.image_num):
@@ -175,7 +177,7 @@ class Rays_DATASET(Dataset):
                     # print(val_idx) 
                 else:
                     train_idx.append(i) # [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 14, 15, 16, 17, 18, 19]
-            # print(train_idx)
+        
             if self.train == True: # Train
                 self.pose = self.pose[train_idx,:,:]
                 self.images = self.images[train_idx,:,:,:]
@@ -186,18 +188,22 @@ class Rays_DATASET(Dataset):
                 self.images = self.images[val_idx,:,:,:]
                 self.image_num = self.pose.shape[0]
                 
-            if self.ndc_space == False:
-                self.all_rays()
+        if self.ndc_space == False:
+            self.all_rays()
                 
-            elif self.ndc_space == True:
-                self.all_rays() # view_dirs
-                self.ndc_all_rays()
+        elif self.ndc_space == True: # default -> LLFF dataloader
+            self.all_rays() # view_dirs
+            self.ndc_all_rays()
         
-        elif self.test == True: # render_poses
-            if self.ndc_space == False:
-                self.test_all_rays()
-            elif self.ndc_space == True:
-                self.test_ndc_all_rays()
+        # train과 test의 차이는 train -> rays_o + rays_d + rays_rgb VS test -> rays_o + rays_d
+        
+        # # test_data_loader = Rays_DATALOADER(config.batch_size, height, width, intrinsic, render_poses, None, None, near, config.ndc_space, True, False, shuffle=False, drop_last=False).data_loader() # Test
+        # elif self.test == True:
+        #     # Test dataloader -> rays_o + rays_d, rays_rgb는 필요 없다.
+        #     if self.ndc_space == False:
+        #         self.test_all_rays()
+        #     elif self.ndc_space == True:
+        #         self.test_ndc_all_rays()
         
     # 하나의 image에 대한 camera to world -> rays_o는 image마다 다르기 때문
     def get_rays(self, pose): # rays_o, rays_d
@@ -247,13 +253,23 @@ class Rays_DATASET(Dataset):
         # rays + rgb -> [2, 378, 504, 3(x, y, -1)] + [1, 378, 504, 3(r, g, b)]
         # get_rays -> rays_o + rays_d
         rays = np.stack([np.stack(self.get_rays(poses), axis=0) for poses in self.pose[:,:3,:4]], axis=0)
-        self.images = self.images[:,np.newaxis,...]
-        rays_rgb = np.concatenate([rays, self.images], axis=1)
-        rays_rgb = np.moveaxis(rays_rgb, source=1, destination=3)
-        rays_rgb = rays_rgb.reshape([-1, 3, 3])
-        self.rays_rgb = rays_rgb.astype(np.float32)
-        self.rays_rgb_list_2 = np.split(self.rays_rgb, self.rays_rgb.shape[0], axis=0)
-        self.rays_rgb_list_2 = [self.rays_rgb_list_2[i].reshape(3, 3) for i in range(len(self.rays_rgb_list_2))]
+        # print(rays.shape) # [18, 2, 378, 504, 3]
+        if self.test == False:
+            self.images = self.images[:,np.newaxis,...]
+            rays = np.concatenate([rays, self.images], axis=1)
+        
+        rays = np.moveaxis(rays, source=1, destination=3)
+        # print(rays.shape) # [18, 378, 504, 3, 3] -> test : [120, 378, 504, 2, 3]
+        if self.test == False:
+            rays = rays.reshape([-1, 3, 3])
+        else:
+            rays = rays.reshape([-1, 2, 3])
+        self.rays = rays.astype(np.float32)
+        self.rays_rgb_list_2 = np.split(self.rays, self.rays.shape[0], axis=0)
+        if self.test == False:
+            self.rays_rgb_list_2 = [self.rays_rgb_list_2[i].reshape(3, 3) for i in range(len(self.rays_rgb_list_2))]
+        else:
+            self.rays_rgb_list_2 = [self.rays_rgb_list_2[i].reshape(2, 3) for i in range(len(self.rays_rgb_list_2))]
         self.view_dirs_list = [self.rays_rgb_list_2[i][1:2,:] for i in range(len(self.rays_rgb_list_2))]
         
     def ndc_all_rays(self):
@@ -265,58 +281,63 @@ class Rays_DATASET(Dataset):
             rays_list.append(rays)
         rays_arr = np.array(rays_list)
 
-        rays_rgb_arr = np.concatenate([rays_arr, self.images], axis=1)
-        rays_rgb_arr = np.moveaxis(rays_rgb_arr, source=1, destination=3)
-        rays_rgb_arr = rays_rgb_arr.reshape(-1, 3, 3)
-        self.rays_rgb_list = [rays_rgb_arr[i,:,:] for i in range(rays_rgb_arr.shape[0])]
-        
-        # view_dirs 처리해야 한다.
-    def test_all_rays(self): # NDC_space = False
-        # test mode -> rays_o + rays_d 만 가져오면 된다.
-        # rays + rgb -> [2, 378, 504, 3(x, y, -1)]
-        # get_rays -> rays_o + rays_d
-        rays = np.stack([np.stack(self.get_rays(poses), axis=0) for poses in self.pose[:,:3,:4]], axis=0)
-        # print(rays.shape) # [120, 2, 378, 504, 3]
-        rays = np.moveaxis(rays, source=1, destination=3)
-        # print(rays.shape) # [120, 378, 504, 2, 3]
-        rays = rays.reshape([-1, 2, 3])
-        # print(rays.shape) # [22861440, 2, 3]
-        self.rays = rays.astype(np.float32)
-        self.rays_rgb_list = np.split(self.rays, self.rays.shape[0], axis=0)
-        # print(self.rays_rgb_list[0].shape) # [1, 2, 3]
-        self.rays_rgb_list = [self.rays_rgb_list[i].reshape(2, 3) for i in range(len(self.rays_rgb_list))]
-        
-        # view_dirs 처리해야 한다.
-    def test_ndc_all_rays(self): # NDC_space = True
-        rays_list = []
-        # print(self.image_num)
-        for i in range(self.pose.shape[0]): # pose의 개수만큼
-            rays_o, rays_d = self.get_rays(self.pose[i,:3,:4])
-            rays = self.ndc_rays(self.near, self.focal, rays_o, rays_d)
-            # print(rays.shape) # [2, 3, 378, 504]
-            rays = np.moveaxis(rays, source=1, destination=-1)
-            # print(rays.shape) # [2, 378, 504, 3]
-            rays_list.append(rays)
-        
-        rays_arr = np.array(rays_list)
-        # print(rays_arr.shape) # [20, 2, 378, 504, 3]
-        # print(self.images.shape) # [20, 378, 504, 3]
-        
+        if self.test == False:
+            rays_arr = np.concatenate([rays_arr, self.images], axis=1)
         rays_arr = np.moveaxis(rays_arr, source=1, destination=3)
-        # print(self.rays_rgb_arr.shape) # [20, 378, 504, 3, 3] = [image num, image height, image width, rays_o + rays_d + rays_rgb]
-        
-        rays_arr = rays_arr.reshape(-1, 2, 3)
-        # print(rays_rgb_arr.shape) # [3810240, 3, 3]
-        
+
+        if self.test == False:
+            rays_arr = rays_arr.reshape(-1, 3, 3)
+        else:
+            rays_arr = rays_arr.reshape(-1, 2, 3)
         self.rays_rgb_list = [rays_arr[i,:,:] for i in range(rays_arr.shape[0])]
-        # print(len(self.rays_rgb_list)) # 3810240
+        
+    #     # view_dirs 처리해야 한다.
+    # def test_all_rays(self): # NDC_space = False
+    #     # test mode -> rays_o + rays_d 만 가져오면 된다.
+    #     # rays + rgb -> [2, 378, 504, 3(x, y, -1)]
+    #     # get_rays -> rays_o + rays_d
+    #     rays = np.stack([np.stack(self.get_rays(poses), axis=0) for poses in self.pose[:,:3,:4]], axis=0)
+    #     # print(rays.shape) # [120, 2, 378, 504, 3]
+    #     rays = np.moveaxis(rays, source=1, destination=3)
+    #     # print(rays.shape) # [120, 378, 504, 2, 3]
+    #     rays = rays.reshape([-1, 2, 3])
+    #     # print(rays.shape) # [22861440, 2, 3]
+    #     self.rays = rays.astype(np.float32)
+    #     self.rays_rgb_list = np.split(self.rays, self.rays.shape[0], axis=0)
+    #     # print(self.rays_rgb_list[0].shape) # [1, 2, 3]
+    #     self.rays_rgb_list = [self.rays_rgb_list[i].reshape(2, 3) for i in range(len(self.rays_rgb_list))]
+        
+    #     # view_dirs 처리해야 한다.
+    # def test_ndc_all_rays(self): # NDC_space = True
+    #     rays_list = []
+    #     # print(self.image_num)
+    #     for i in range(self.pose.shape[0]): # pose의 개수만큼
+    #         rays_o, rays_d = self.get_rays(self.pose[i,:3,:4])
+    #         rays = self.ndc_rays(self.near, self.focal, rays_o, rays_d)
+    #         # print(rays.shape) # [2, 3, 378, 504]
+    #         rays = np.moveaxis(rays, source=1, destination=-1)
+    #         # print(rays.shape) # [2, 378, 504, 3]
+    #         rays_list.append(rays)
+        
+    #     rays_arr = np.array(rays_list)
+    #     # print(rays_arr.shape) # [20, 2, 378, 504, 3]
+    #     # print(self.images.shape) # [20, 378, 504, 3]
+        
+    #     rays_arr = np.moveaxis(rays_arr, source=1, destination=3)
+    #     # print(self.rays_rgb_arr.shape) # [20, 378, 504, 3, 3] = [image num, image height, image width, rays_o + rays_d + rays_rgb]
+        
+    #     rays_arr = rays_arr.reshape(-1, 2, 3)
+    #     # print(rays_rgb_arr.shape) # [3810240, 3, 3]
+        
+    #     self.rays_rgb_list = [rays_arr[i,:,:] for i in range(rays_arr.shape[0])]
+    #     # print(len(self.rays_rgb_list)) # 3810240
         
     def __len__(self): # should be iterable
         return len(self.rays_rgb_list)
         
     def __getitem__(self, index): # should be iterable
         samples = self.rays_rgb_list[index]
-        view_dirs = self.view_dirs_list[index]
+        view_dirs = self.view_dirs_list[index] # Debugging -> test시에는 없다.
         results = [samples, view_dirs]
         # return samples, view_dirs # rays_o + rays_d + rgb
         return results

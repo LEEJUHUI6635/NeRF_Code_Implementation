@@ -183,9 +183,9 @@ class NeRF(nn.Module):
     def forward(self, x, sampling): # forward() : gradient의 학습을 결정 -> coarse와 fine을 한 개로 통일해야 한다.
         # coarse -> [65536, 90] / fine -> [131072, 90]
         if sampling.lower() == 'coarse':
-            sample_num = 64
+            sample_num = 64 # 변수로 치환
         elif sampling.lower() == 'fine':
-            sample_num = 128
+            sample_num = 128 # 변수로 치환
             
         pts = x[:,:self.pts_channel]
         dirs = x[:,self.pts_channel:self.pts_channel+self.dir_channel]

@@ -7,7 +7,7 @@ import torch.optim as optim
 import numpy as np
 import cv2 as cv
 import os
-
+import time
 # train 할 때에는 random하게 ray를 섞어야 하기 때문에, ray를 합쳐 하나의 image로 만드는 작업 -> 하나의 함수
 # learning rate decay -> iteration이 한 번씩 돌 때마다
 
@@ -28,31 +28,32 @@ class Save_Checkpoints(object):
             self.save_checkpoints_last()
     def save_checkpoints_epoch(self):
         torch.save({'epoch': self.epoch, 
-                    'model': self.model, 
-                    'optimizer': self.optimizer, 
+                    'model': self.model.state_dict(), 
+                    'optimizer': self.optimizer.state_dict(), 
                     'loss': self.loss}, os.path.join(self.save_path, 'checkpoints_{}.pt'.format(self.epoch))) # self.save_path + 'checkpoints_{}.pt'
     def save_checkpoints_last(self):
         torch.save({'epoch': self.epoch,
-                    'model': self.model,
-                    'optimizer': self.optimizer,
+                    'model': self.model.state_dict(),
+                    'optimizer': self.optimizer.state_dict(),
                     'loss': self.loss}, os.path.join(self.save_path, 'checkpoints_last.pt'))
 
 class Solver(object):
-    def __init__(self, data_loader, val_data_loader, config, i_val, height, width):
+    def __init__(self, data_loader, val_data_loader, test_data_loader, config, i_val, height, width):
         self.data_loader = data_loader # rays dataloader
         self.val_data_loader = val_data_loader
+        self.test_data_loader = test_data_loader
         
         # iterations
         self.resume_iters = config.resume_iters
         self.nb_epochs = config.nb_epochs
-        self.nb_iters = config.nb_iters
-        
+        self.save_val_iters = config.save_val_iters
+        self.save_model_iters = config.save_model_iters # 15
         self.batch_size = config.batch_size
         self.coarse_num = config.coarse_num # 64
         self.fine_num = config.fine_num # 64
         self.sample_num = self.coarse_num # 64
-        self.near = config.near
-        self.far = config.far
+        self.near = config.near # 0.
+        self.far = config.far # 1.
         self.L_pts = config.L_pts # 10
         self.L_dirs = config.L_dirs # 4
         self.learning_rate = config.learning_rate
@@ -122,27 +123,25 @@ class Solver(object):
         alpha = 1 - torch.exp(-active_func((density.squeeze() + noise) * dists))
         transmittance = torch.cumprod(torch.cat([torch.ones(alpha.shape[0], 1).to(self.device), (1 - alpha + 1e-10).to(self.device)], dim=-1), dim=-1)[:,:-1]
         weights = alpha * transmittance
-
+        
         rgb_2d = torch.sum(weights[...,None] * rgb_3d, dim=-2)
         return rgb_2d, weights
     
     # *****net_chunk*****
     def train(self): # device -> dataset, model
-        # self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        # # self.coarse_model = NeRF(self.pts_channel, self.output_channel, self.dir_channel, self.batch_size, self.sample_num, self.device).to(self.device)
-        # coarse_model = NeRF().to(self.device)
-        # grad_variables = list(coarse_model.parameters())
-        # # self.fine_model = NeRF(self.pts_channel, self.output_channel, self.dir_channel, self.batch_size, self.sample_num, self.device).to(self.device)
-        # fine_model = NeRF().to(self.device)
-        # grad_variables += list(fine_model.parameters())
-        
-        # # optimizer
-        # optimizer = optim.Adam(params=grad_variables, lr=self.learning_rate, betas=(0.9, 0.999))
-        
-        # # loss function
-        # criterion = lambda x, y : torch.mean((x - y) ** 2)
-        
-        for epoch in range(self.nb_epochs):
+        # 학습 재기 -> 마지막에 저장된 checkpoints의 epoch, coarse_model, fine_model, optimizer를 가져온다.
+        start_iters = 0
+        if self.resume_iters != None: # self.resume_iters
+            coarse_ckpt = torch.load(os.path.join(self.save_coarse_path, 'checkpoints_{}.pt'.format(self.resume_iters)))
+            fine_ckpt = torch.load(os.path.join(self.save_fine_path, 'checkpoints_{}.pt'.format(self.resume_iters)))
+            self.coarse_model.load_state_dict(coarse_ckpt['model'])
+            self.fine_model.load_state_dict(fine_ckpt['model'])
+            self.optimizer.load_state_dict(coarse_ckpt['optimizer'])
+            start_iters = self.resume_iters + 1
+            self.coarse_model.train()
+            self.fine_model.train()
+            
+        for epoch in range(start_iters, self.nb_epochs):
             # Dataloader -> 1024로 나눠 학습
             self.train_image_list = []
             for idx, [rays, view_dirs] in enumerate(self.data_loader): # Dataloader -> rays = rays_o + rays_d + rays_rgb / view_dirs
@@ -174,7 +173,7 @@ class Solver(object):
                 # Coarse Network
                 outputs = self.coarse_model(inputs, sampling='coarse')
                 # outputs = self.coarse_model(inputs)
-                outputs = outputs.reshape(batch_size, self.coarse_num, 4)
+                outputs = outputs.reshape(batch_size, self.coarse_num, 4) # rgb + density
                 rgb_2d, weights = self.classic_volume_rendering(outputs, z_vals, rays, self.device)
                 
                 # Hierarchical sampling + viewing_directions
@@ -220,109 +219,17 @@ class Solver(object):
             new_lrate = self.learning_rate * (decay_rate ** (epoch / decay_steps))
             for param_group in self.optimizer.param_groups:
                 param_group['lr'] = new_lrate
+
+            # 한 epoch마다 model, optimizer 저장 -> 15 epoch마다
+            # Save_Checkpoints -> 하나로 합치기
+            # if epoch % self.save_model_iters == 0 and epoch > 0: 
+            if epoch % 1 == 0 and epoch > 0:
+                Save_Checkpoints(epoch, self.coarse_model, self.optimizer, loss, self.save_coarse_path, 'epoch')
+                Save_Checkpoints(epoch, self.fine_model, self.optimizer, loss, self.save_fine_path, 'epoch')
             
-    # # *****net_chunk*****
-    # def train(self): # device -> dataset, model
-    #     for epoch in range(self.nb_epochs):
-    #         # Dataloader -> 1024로 나눠 학습
-    #         self.train_image_list = []
-    #         for idx, [rays, view_dirs] in enumerate(self.data_loader): # Dataloader -> rays = rays_o + rays_d + rays_rgb / view_dirs
-    #             rays = rays.float()
-    #             view_dirs = view_dirs.float()
-    #             batch_size = rays.shape[0]
-    #             # view_dirs -> NDC 처리 전의 get_rays로부터
-    #             view_dirs = viewing_directions(view_dirs) # [1024, 3]
-    #             rays_o = rays[:,0,:]
-    #             rays_d = rays[:,1,:]
-    #             rays_rgb = rays[:,2,:] # True
-                
-    #             # Stratified Sampling -> rays_o + rays_d -> view_dirs x
-    #             pts, z_vals = Stratified_Sampling(rays_o, rays_d, batch_size, self.sample_num, self.near, self.far, self.device).outputs()
-    #             pts = pts.reshape(batch_size, self.coarse_num, 3) # sample_num, [1024, 64, 3]
-    #             coarse_view_dirs = view_dirs[:,None].expand(pts.shape) # [1024, 64, 3]
-    #             pts = pts.reshape(-1, 3) # [65536, 3]
-    #             coarse_view_dirs = coarse_view_dirs.reshape(-1, 3)
-                
-    #             # Positional Encoding
-    #             coarse_pts = Positional_Encoding(self.L_pts).outputs(pts) # position
-    #             coarse_view_dirs = Positional_Encoding(self.L_dirs).outputs(coarse_view_dirs) # viewing direction
-    #             coarse_pts = coarse_pts.to(self.device)
-    #             coarse_view_dirs = coarse_view_dirs.to(self.device)
-
-    #             inputs = torch.cat([coarse_pts, coarse_view_dirs], dim=-1)
-    #             inputs = inputs.to(self.device)
-                
-    #             # Coarse Network
-    #             # outputs = self.coarse_model(inputs, sampling='coarse')
-    #             outputs = self.coarse_model(inputs)
-    #             outputs = outputs.reshape(batch_size, self.coarse_num, 4)
-    #             rgb_2d, weights = self.classic_volume_rendering(outputs, z_vals, rays, self.device)
-                
-    #             # Hierarchical sampling + viewing_directions
-    #             fine_pts, fine_z_vals = Hierarchical_Sampling(rays, z_vals, weights, batch_size, self.sample_num, self.device).outputs()
-    #             fine_pts = fine_pts.reshape(batch_size, 128, 3) # [1024, 128, 3]
-                
-    #             fine_view_dirs = view_dirs[:,None].expand(fine_pts.shape) # [1024, 128, 3]
-    #             fine_pts = fine_pts.reshape(-1, 3)
-    #             fine_view_dirs = fine_view_dirs.reshape(-1, 3)
-                
-    #             # Positional Encoding
-    #             fine_pts = Positional_Encoding(self.L_pts).outputs(fine_pts)
-    #             fine_view_dirs = Positional_Encoding(self.L_dirs).outputs(fine_view_dirs)
-    #             fine_pts = fine_pts.to(self.device)
-    #             fine_view_dirs = fine_view_dirs.to(self.device)
-    #             fine_inputs = torch.cat([fine_pts, fine_view_dirs], dim=-1)
-    #             fine_inputs = fine_inputs.to(self.device)
-                
-    #             # Fine model
-    #             # fine_outputs = self.fine_model(fine_inputs, sampling='fine')
-    #             fine_outputs = self.fine_model(fine_inputs)
-    #             fine_outputs = fine_outputs.reshape(rays.shape[0], 128, 4)
-
-    #             # classic volume rendering
-    #             fine_rgb_2d, fine_weights = self.classic_volume_rendering(fine_outputs, fine_z_vals, rays, self.device) # z_vals -> Stratified sampling된 후의 z_vals
-    #             fine_rgb_2d = fine_rgb_2d.to(self.device)
-    #             rgb_2d = rgb_2d.to(self.device)
-    #             rays_rgb = rays_rgb.to(self.device)
-    #             loss = self.criterion(fine_rgb_2d, rays_rgb) + self.criterion(rgb_2d, rays_rgb) # Coarse + Fine
-    #             print(loss)
-                
-    #             # optimizer
-    #             self.optimizer.zero_grad()
-    #             loss.backward()
-    #             self.optimizer.step()
-
-    #             # print(rays.shape) # [1024, 3, 3] 
-    #             print(idx, loss)
-                # print(self.learning_rate)
-                
-                # Train image
-                # 하나의 iteration이 끝남 -> 하나의 batch가 쌓여야 한다.
-                # fine_rgb_2d = fine_rgb_2d.cpu().detach().numpy()
-                # # print(type(rgb_2d))
-                # fine_rgb_2d = (255*np.clip(fine_rgb_2d,0,1)).astype(np.uint8)
-
-            #     self.train_image_list.append(fine_rgb_2d) # [1024, 3]
-
-            # self.train_image_arr = np.concatenate(self.train_image_list, axis=0)
-            # self.train_image_arr = self.train_image_arr.reshape(18, 378, 504, 3) # image의 개수
-            
-            # for i in range(5): # 첫 번째 이미지만을 출력
-            #     image = self.train_image_arr[i,:,:,:]
-            #     cv.imwrite('./data/results/2_JH_sampling_{}_{}.png'.format(epoch, i), image) # debugging
-                
-                # # Learning rate decay
-                # decay_rate = 0.1
-                # decay_steps = 250 * 1000
-                # new_lrate = self.learning_rate * (decay_rate ** ((idx + epoch * 3348)/decay_steps))
-                # self.learning_rate = new_lrate
-
-            # if epoch % 5 == 0 and epoch > 0: # Fine model + Coarse model 모두 저장
-            #     Save_Checkpoints(epoch, self.coarse_model, self.optimizer, loss, self.save_coarse_path, 'epoch')
-            #     Save_Checkpoints(epoch, self.fine_model, self.optimizer, loss, self.save_fine_path, 'epoch')
-
             # Validation -> Validataion Dataloader = rays + NDC space 전에 추출한 get_rays의 view_dirs -> Train과 똑같이 처리한다. 다만, rays_rgb는 가져올 필요 없다.
-            if epoch % 1 == 0: # if epoch % 10 == 0 and epoch > 0:
+            # if epoch % self.save_val_iters == 0 and epoch > 0: # if epoch % 10 == 0 and epoch > 0:
+            if epoch % 1 == 0 and epoch > 0:
                 with torch.no_grad():
                     val_image_list = []
                     for idx, [rays, view_dirs] in enumerate(self.val_data_loader): # rays + view_dirs
@@ -385,8 +292,96 @@ class Solver(object):
                         val_image_list.append(fine_rgb_2d)
                         
                     val_image_arr = np.concatenate(val_image_list, axis=0)
-                    val_image_arr = val_image_arr.reshape(2, 378, 504, 3)
-                    for i in range(2):
+                    val_image_arr = val_image_arr.reshape(2, 378, 504, 3) # validation image 개수만큼 -> flexible
+                    for i in range(2): # 2 -> flexible
                         image = val_image_arr[i,:,:,:]
-                        # cv.imwrite('./results/test/2_{}_{}.png'.format(epoch, i), image)
-                        cv.imwrite('./results/test5/{}_{}.png'.format(epoch, i), image)
+                        cv.imwrite('./results/val/{}_{}.png'.format(epoch, i), image)
+    
+    def test(self):
+        # render_only -> model checkpoints 가져오기
+        # validation과 비슷하게 수행 -> test_dataloader에서 가져오기
+        # 학습 재기 -> 마지막에 저장된 checkpoints의 coarse model과 fine model을 가져온다.
+        coarse_ckpt = torch.load(os.path.join(self.save_coarse_path, 'checkpoints_{}.pt'.format(self.resume_iters)))
+        fine_ckpt = torch.load(os.path.join(self.save_fine_path, 'checkpoints_{}.pt'.format(self.resume_iters)))
+        self.coarse_model.load_state_dict(coarse_ckpt['model'])
+        self.fine_model.load_state_dict(fine_ckpt['model'])
+        self.coarse_model.eval()
+        self.fine_model.eval()
+        
+        with torch.no_grad():
+            test_image_list = []
+            start_time = time.time()
+            i = 0
+            for idx, [rays, view_dirs] in enumerate(self.test_data_loader): # rays + view_dirs
+                batch_size = rays.shape[0]
+                # view_dirs -> NDC 처리 전의 get_rays로부터
+                view_dirs = viewing_directions(view_dirs) # [1024, 3]
+                rays_o = rays[:,0,:]
+                rays_d = rays[:,1,:]
+                # rays_rgb = rays[:,2,:] # Test -> 쓸모 없다.
+                
+                # Stratified Sampling -> rays_o + rays_d -> view_dirs x
+                pts, z_vals = Stratified_Sampling(rays_o, rays_d, batch_size, self.sample_num, self.near, self.far, self.device).outputs()
+                pts = pts.reshape(batch_size, self.coarse_num, 3) # sample_num
+                coarse_view_dirs = view_dirs[:,None].expand(pts.shape) # [1024, 64, 3]
+                pts = pts.reshape(-1, 3)
+                coarse_view_dirs = coarse_view_dirs.reshape(-1, 3)
+                
+                # Positional Encoding
+                coarse_pts = Positional_Encoding(self.L_pts).outputs(pts) # position
+                coarse_view_dirs = Positional_Encoding(self.L_dirs).outputs(coarse_view_dirs) # viewing direction
+                coarse_pts = coarse_pts.to(self.device)
+                coarse_view_dirs = coarse_view_dirs.to(self.device)
+
+                inputs = torch.cat([coarse_pts, coarse_view_dirs], dim=-1)
+                inputs = inputs.to(self.device)
+                
+                # Coarse Network
+                outputs = self.coarse_model(inputs, sampling='coarse')
+                # outputs = self.coarse_model(inputs)
+                outputs = outputs.reshape(batch_size, self.coarse_num, 4)
+                rgb_2d, weights = self.classic_volume_rendering(outputs, z_vals, rays, self.device)
+                
+                # Hierarchical sampling + viewing_directions
+                fine_pts, fine_z_vals = Hierarchical_Sampling(rays, z_vals, weights, batch_size, self.sample_num, self.device).outputs()
+                fine_pts = fine_pts.reshape(batch_size, 128, 3) # [1024, 128, 3]
+                
+                fine_view_dirs = view_dirs[:,None].expand(fine_pts.shape) # [1024, 128, 3]
+                fine_pts = fine_pts.reshape(-1, 3)
+                fine_view_dirs = fine_view_dirs.reshape(-1, 3)
+                
+                # Positional Encoding
+                fine_pts = Positional_Encoding(self.L_pts).outputs(fine_pts)
+                fine_view_dirs = Positional_Encoding(self.L_dirs).outputs(fine_view_dirs)
+                fine_pts = fine_pts.to(self.device)
+                fine_view_dirs = fine_view_dirs.to(self.device)
+                fine_inputs = torch.cat([fine_pts, fine_view_dirs], dim=-1)
+                fine_inputs = fine_inputs.to(self.device)
+                
+                # Fine model
+                fine_outputs = self.fine_model(fine_inputs, sampling='fine')
+                # fine_outputs = self.fine_model(fine_inputs)
+                fine_outputs = fine_outputs.reshape(rays.shape[0], 128, 4)
+
+                # classic volume rendering
+                fine_rgb_2d, fine_weights = self.classic_volume_rendering(fine_outputs, fine_z_vals, rays, self.device) # z_vals -> Stratified sampling된 후의 z_vals
+                fine_rgb_2d = fine_rgb_2d.to(self.device)
+                # print(fine_rgb_2d.shape) # [1024, 3]
+                fine_rgb_2d = fine_rgb_2d.cpu().detach().numpy()
+                fine_rgb_2d = (255*np.clip(fine_rgb_2d,0,1)).astype(np.uint8)
+                # 하나의 image 씩 -> batch_size가 1024가 아닐 때, (다른 dataset의 경우) image list의 길이가 378 x 504를 넘을 때, 하나의 이미지로 만든다.
+                test_image_list.append(fine_rgb_2d)
+        
+                if batch_size != 1024 or len(test_image_list) >= self.height * self.width:
+                    test_image_arr = np.concatenate(test_image_list, axis=0)
+                    test_image_arr = test_image_arr.reshape(120, self.height, self.width, 3)
+                    cv.imwrite('./results/test/{}.png'.format(), test_image_arr)
+                    test_image_list = [] # 이미지 1개 만들어내면, list 비우기
+                    i += 1
+                    
+            # val_image_arr = np.concatenate(test_image_list, axis=0)
+            # val_image_arr = val_image_arr.reshape(120, 378, 504, 3) # validation image 개수만큼 -> flexible
+            # for i in range(120): # 120개의 image
+            #     image = val_image_arr[i,:,:,:]
+            #     cv.imwrite('./results/test/{}.png'.format(i), image)
+            #     print('----{}s seconds----'.format(time.time() - start_time)) # enumerate -> tqdm -> 진행 사항 표시 -> 21분 걸림 -> 시간 줄여야 한다.
