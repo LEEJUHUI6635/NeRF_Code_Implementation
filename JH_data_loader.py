@@ -2,7 +2,7 @@ from torch.utils.data import Dataset, DataLoader
 import numpy as np
 import os
 import cv2 as cv
-
+import sys
 # Dataloader에서 ***bds_factor = 0.75***
 
 def normalize(x):
@@ -29,7 +29,7 @@ def new_origin(poses): # input -> poses[20, 3, 5], output -> average pose[3, 5]
     return new_world
 
 class LLFF(object): # *** bd_factor를 추가해야 한다. ***
-    def __init__(self, base_dir, factor, bd_factor=0.75):
+    def __init__(self, base_dir, factor, bd_factor=0.75): # bd_factor = 0.75로 고정
         self.base_dir = base_dir
         self.factor = factor
         self.bd_factor = bd_factor # ***
@@ -76,6 +76,8 @@ class LLFF(object): # *** bd_factor를 추가해야 한다. ***
         last = np.array([0, 0, 0, 1]).reshape(1, 4)
         # image_height, image_width, focal_length를 factor로 나눈다.
         hwf = new_world[:,-1].reshape(1, 3, 1) // self.factor
+        self.focal = np.squeeze(hwf[:,-1,:])
+
         new_world = np.concatenate([new_world[:,:4], last], axis=0)
         last = last.reshape(1, 1, 4)
         lasts = np.repeat(last, image_num, axis=0)
@@ -147,7 +149,8 @@ class LLFF(object): # *** bd_factor를 추가해야 한다. ***
         bds = self.bds # Test 
         render_poses = self.render_poses.astype(np.float32) # Test
         i_val = self.i_val # Test
-        return images, poses, bds, render_poses, i_val
+        focal = self.focal
+        return images, poses, bds, render_poses, i_val, focal # focal length 추가해야 할 듯.
 
 # poses <- poses : Train or Validation / poses <- render_poses : Test
 class Rays_DATASET(Dataset):
@@ -291,47 +294,6 @@ class Rays_DATASET(Dataset):
             rays_arr = rays_arr.reshape(-1, 2, 3)
         self.rays_rgb_list = [rays_arr[i,:,:] for i in range(rays_arr.shape[0])]
         
-    #     # view_dirs 처리해야 한다.
-    # def test_all_rays(self): # NDC_space = False
-    #     # test mode -> rays_o + rays_d 만 가져오면 된다.
-    #     # rays + rgb -> [2, 378, 504, 3(x, y, -1)]
-    #     # get_rays -> rays_o + rays_d
-    #     rays = np.stack([np.stack(self.get_rays(poses), axis=0) for poses in self.pose[:,:3,:4]], axis=0)
-    #     # print(rays.shape) # [120, 2, 378, 504, 3]
-    #     rays = np.moveaxis(rays, source=1, destination=3)
-    #     # print(rays.shape) # [120, 378, 504, 2, 3]
-    #     rays = rays.reshape([-1, 2, 3])
-    #     # print(rays.shape) # [22861440, 2, 3]
-    #     self.rays = rays.astype(np.float32)
-    #     self.rays_rgb_list = np.split(self.rays, self.rays.shape[0], axis=0)
-    #     # print(self.rays_rgb_list[0].shape) # [1, 2, 3]
-    #     self.rays_rgb_list = [self.rays_rgb_list[i].reshape(2, 3) for i in range(len(self.rays_rgb_list))]
-        
-    #     # view_dirs 처리해야 한다.
-    # def test_ndc_all_rays(self): # NDC_space = True
-    #     rays_list = []
-    #     # print(self.image_num)
-    #     for i in range(self.pose.shape[0]): # pose의 개수만큼
-    #         rays_o, rays_d = self.get_rays(self.pose[i,:3,:4])
-    #         rays = self.ndc_rays(self.near, self.focal, rays_o, rays_d)
-    #         # print(rays.shape) # [2, 3, 378, 504]
-    #         rays = np.moveaxis(rays, source=1, destination=-1)
-    #         # print(rays.shape) # [2, 378, 504, 3]
-    #         rays_list.append(rays)
-        
-    #     rays_arr = np.array(rays_list)
-    #     # print(rays_arr.shape) # [20, 2, 378, 504, 3]
-    #     # print(self.images.shape) # [20, 378, 504, 3]
-        
-    #     rays_arr = np.moveaxis(rays_arr, source=1, destination=3)
-    #     # print(self.rays_rgb_arr.shape) # [20, 378, 504, 3, 3] = [image num, image height, image width, rays_o + rays_d + rays_rgb]
-        
-    #     rays_arr = rays_arr.reshape(-1, 2, 3)
-    #     # print(rays_rgb_arr.shape) # [3810240, 3, 3]
-        
-    #     self.rays_rgb_list = [rays_arr[i,:,:] for i in range(rays_arr.shape[0])]
-    #     # print(len(self.rays_rgb_list)) # 3810240
-        
     def __len__(self): # should be iterable
         return len(self.rays_rgb_list)
         
@@ -350,7 +312,7 @@ class Rays_DATALOADER(object):
         self.poses = poses
         self.i_val = i_val
         self.images = images
-        self.near = near
+        self.near = near # 1.0 -> default
         self.ndc_space = ndc_space
         self.test = test
         self.train = train
@@ -360,5 +322,5 @@ class Rays_DATALOADER(object):
         self.drop_last = drop_last # 나중에 train이면 drop_last = True / validation 혹은 test이면 drop_last = False 되게끔 만들기 !
         
     def data_loader(self): # shuffle = False
-        dataloader = DataLoader(dataset=self.results, batch_size=self.batch_size, shuffle = self.shuffle, drop_last=False) # drop_last = False -> 마지막 batch 또한 학습한다.
+        dataloader = DataLoader(dataset=self.results, batch_size=self.batch_size, shuffle = self.shuffle, num_workers=4, pin_memory=True, drop_last=False) # drop_last = False -> 마지막 batch 또한 학습한다.
         return dataloader

@@ -26,7 +26,7 @@ parser.add_argument('--ndc_space', type=bool, default=True)
 parser.add_argument('--resume_iters', type=int, default=None)
 parser.add_argument('--mode', type=str, default='Train', choices=['Train', 'Test']) # list 형식으로 만들기
 parser.add_argument('--nb_epochs', type=int, default=60) # 60 epoch = 20000 iterations
-parser.add_argument('--save_val_iters', type=int, default=1) # 1 epoch마다 validation 수행
+parser.add_argument('--save_val_iters', type=int, default=5) # 1 epoch마다 validation 수행
 parser.add_argument('--save_model_iters', type=int, default=15)
 
 parser.add_argument('--near', type=int, default=0)
@@ -62,13 +62,15 @@ if not os.path.exists(config.save_fine_path):
     os.makedirs(config.save_fine_path)
 
 # Dataset preprocessing
-images, poses, bds, render_poses, i_val = LLFF(config.base_dir, config.factor).outputs()
+images, poses, bds, render_poses, i_val, focal = LLFF(config.base_dir, config.factor).outputs() # focal도 추출
 
-# 아래의 것들은 JH_data_loader에 넣어버린다.
+# 하나의 함수로 묶을까?
+# 아래의 것들은 JH_data_loader에 넣어버린다. -> 안 넣어도 될 듯.
 height = images.shape[1] # 378 # 어떻게 자동화시키지?
 width = images.shape[2] # 504
-factor = 8
-focal = 3260.526333 / factor
+# factor = 8
+# focal = 3260.526333 / config.factor
+
 # print(focal) # 407.0
 intrinsic = np.array([
             [focal, 0, 0.5*width], # 0.5*W = x축 방향의 주점
@@ -79,7 +81,9 @@ near = 1. # const처럼 만들기
 # Train -> data_loader + val_data_loader만 키고, Test -> test_data_loader만 키자. -> for 시간 단축
 # Train data loader -> shuffle = True / Validation data loader -> shuffle = False
 if config.mode == 'Train':
+    # tqdm
     data_loader = Rays_DATALOADER(config.batch_size, height, width, intrinsic, poses, i_val, images, near, config.ndc_space, False, True, shuffle=True, drop_last=False).data_loader() # Train
+    # data_loader = Rays_DATALOADER(config.batch_size, height, width, intrinsic, poses, i_val, images, near, config.ndc_space, False, True, shuffle=True, drop_last=False) # Train -> tqdm
     val_data_loader = Rays_DATALOADER(config.batch_size, height, width, intrinsic, poses, i_val, images, near, config.ndc_space, False, False, shuffle=False, drop_last=False).data_loader() # Validation
     Solver(data_loader, val_data_loader, None, config, i_val, height, width).train()
 elif config.mode == 'Test':

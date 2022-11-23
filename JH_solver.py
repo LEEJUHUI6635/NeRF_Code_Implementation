@@ -8,6 +8,7 @@ import numpy as np
 import cv2 as cv
 import os
 import time
+import tqdm
 # train 할 때에는 random하게 ray를 섞어야 하기 때문에, ray를 합쳐 하나의 image로 만드는 작업 -> 하나의 함수
 # learning rate decay -> iteration이 한 번씩 돌 때마다
 
@@ -99,6 +100,9 @@ class Solver(object):
         
         # loss function
         self.criterion = lambda x, y : torch.mean((x - y) ** 2)
+        
+        # evaluation metric -> PSNR
+        self.psnr = lambda x : -10. * torch.log(x) / torch.log(torch.Tensor([10.]).to(self.device))
 
     # Classic Volume Rendering -> rays_d = rays_d
     def classic_volume_rendering(self, raw, z_vals, rays, device): # input -> Network의 outputs [1024, 64, 4] + z_vals / output -> 2D color [1024, 3] -> rgb
@@ -141,10 +145,14 @@ class Solver(object):
             self.coarse_model.train()
             self.fine_model.train()
             
-        for epoch in range(start_iters, self.nb_epochs):
+        # Time check
+        start_time = time.time()
+        # for epoch in range(start_iters, self.nb_epochs):
+        for epoch in tqdm.tqdm(range(start_iters, self.nb_epochs)):
             # Dataloader -> 1024로 나눠 학습
             self.train_image_list = []
-            for idx, [rays, view_dirs] in enumerate(self.data_loader): # Dataloader -> rays = rays_o + rays_d + rays_rgb / view_dirs
+            for idx, [rays, view_dirs] in enumerate(tqdm.tqdm(self.data_loader)): # Dataloader -> rays = rays_o + rays_d + rays_rgb / view_dirs
+            # for idx, [rays, view_dirs] in enumerate(self.data_loader):
                 rays = rays.float()
                 view_dirs = view_dirs.float()
                 batch_size = rays.shape[0]
@@ -178,7 +186,7 @@ class Solver(object):
                 
                 # Hierarchical sampling + viewing_directions
                 fine_pts, fine_z_vals = Hierarchical_Sampling(rays, z_vals, weights, batch_size, self.sample_num, self.device).outputs()
-                fine_pts = fine_pts.reshape(batch_size, 128, 3) # [1024, 128, 3]
+                fine_pts = fine_pts.reshape(batch_size, self.coarse_num + self.fine_num, 3) # [1024, 128, 3] -> [1024, self.coarse_num + self.fine_num, 3]
                 
                 fine_view_dirs = view_dirs[:,None].expand(fine_pts.shape) # [1024, 128, 3]
                 fine_pts = fine_pts.reshape(-1, 3)
@@ -195,7 +203,7 @@ class Solver(object):
                 # Fine model
                 fine_outputs = self.fine_model(fine_inputs, sampling='fine')
                 # fine_outputs = self.fine_model(fine_inputs)
-                fine_outputs = fine_outputs.reshape(rays.shape[0], 128, 4)
+                fine_outputs = fine_outputs.reshape(rays.shape[0], self.coarse_num + self.fine_num, 4) # 128 = self.coarse_num + self.fine_num
 
                 # classic volume rendering
                 fine_rgb_2d, fine_weights = self.classic_volume_rendering(fine_outputs, fine_z_vals, rays, self.device) # z_vals -> Stratified sampling된 후의 z_vals
@@ -209,8 +217,13 @@ class Solver(object):
                 loss.backward()
                 self.optimizer.step()
 
-                # print(rays.shape) # [1024, 3, 3] 
-                print(idx, loss)
+                psnr = self.psnr(loss) # psnr 조금 수정해야 할 듯.
+                # print(rays.shape) # [1024, 3, 3]
+                # iteration n번 마다 출력
+                
+            # 한 epoch가 지날 때마다,
+            print(idx, loss, psnr)
+            print('----{}s seconds----'.format(time.time() - start_time))
             
             # Learning rate decay -> self.optimizer에도 적용되어야 한다.
             # epoch마다
@@ -222,17 +235,17 @@ class Solver(object):
 
             # 한 epoch마다 model, optimizer 저장 -> 15 epoch마다
             # Save_Checkpoints -> 하나로 합치기
-            # if epoch % self.save_model_iters == 0 and epoch > 0: 
-            if epoch % 1 == 0 and epoch > 0:
+            if epoch % self.save_model_iters == 0 and epoch > 0: 
+            # if epoch % 1 == 0 and epoch > 0:
                 Save_Checkpoints(epoch, self.coarse_model, self.optimizer, loss, self.save_coarse_path, 'epoch')
                 Save_Checkpoints(epoch, self.fine_model, self.optimizer, loss, self.save_fine_path, 'epoch')
             
             # Validation -> Validataion Dataloader = rays + NDC space 전에 추출한 get_rays의 view_dirs -> Train과 똑같이 처리한다. 다만, rays_rgb는 가져올 필요 없다.
-            # if epoch % self.save_val_iters == 0 and epoch > 0: # if epoch % 10 == 0 and epoch > 0:
-            if epoch % 1 == 0 and epoch > 0:
+            if epoch % self.save_val_iters == 0 and epoch > 0: # if epoch % 10 == 0 and epoch > 0:
+            # if epoch % 1 == 0 and epoch > 0:
                 with torch.no_grad():
                     val_image_list = []
-                    for idx, [rays, view_dirs] in enumerate(self.val_data_loader): # rays + view_dirs
+                    for idx, [rays, view_dirs] in enumerate(tqdm.tqdm(self.val_data_loader)): # rays + view_dirs
                         batch_size = rays.shape[0]
                         # view_dirs -> NDC 처리 전의 get_rays로부터
                         view_dirs = viewing_directions(view_dirs) # [1024, 3]
@@ -264,7 +277,7 @@ class Solver(object):
                         
                         # Hierarchical sampling + viewing_directions
                         fine_pts, fine_z_vals = Hierarchical_Sampling(rays, z_vals, weights, batch_size, self.sample_num, self.device).outputs()
-                        fine_pts = fine_pts.reshape(batch_size, 128, 3) # [1024, 128, 3]
+                        fine_pts = fine_pts.reshape(batch_size, self.coarse_num + self.fine_num, 3) # [1024, 128, 3] -> 128 = self.coarse_num + self.fine_num
                         
                         fine_view_dirs = view_dirs[:,None].expand(fine_pts.shape) # [1024, 128, 3]
                         fine_pts = fine_pts.reshape(-1, 3)
@@ -281,7 +294,7 @@ class Solver(object):
                         # Fine model
                         fine_outputs = self.fine_model(fine_inputs, sampling='fine')
                         # fine_outputs = self.fine_model(fine_inputs)
-                        fine_outputs = fine_outputs.reshape(rays.shape[0], 128, 4)
+                        fine_outputs = fine_outputs.reshape(rays.shape[0], self.coarse_num + self.fine_num, 4) # 128 = self.coarse_num + self.fine_num
 
                         # classic volume rendering
                         fine_rgb_2d, fine_weights = self.classic_volume_rendering(fine_outputs, fine_z_vals, rays, self.device) # z_vals -> Stratified sampling된 후의 z_vals
@@ -292,10 +305,11 @@ class Solver(object):
                         val_image_list.append(fine_rgb_2d)
                         
                     val_image_arr = np.concatenate(val_image_list, axis=0)
-                    val_image_arr = val_image_arr.reshape(2, 378, 504, 3) # validation image 개수만큼 -> flexible
+                    val_image_arr = val_image_arr.reshape(2, self.height, self.width, 3) # validation image 개수만큼 -> flexible
                     for i in range(2): # 2 -> flexible
                         image = val_image_arr[i,:,:,:]
-                        cv.imwrite('./results/val/{}_{}.png'.format(epoch, i), image)
+                        # cv.imwrite('./results/val/{}_{}.png'.format(epoch, i), image)
+                        cv.imwrite(os.path.join(self.save_train_path, 'validation_epoch_{}_{}.png'.format(epoch, i)), image)
     
     def test(self):
         # render_only -> model checkpoints 가져오기
@@ -312,7 +326,7 @@ class Solver(object):
             test_image_list = []
             start_time = time.time()
             i = 0
-            for idx, [rays, view_dirs] in enumerate(self.test_data_loader): # rays + view_dirs
+            for idx, [rays, view_dirs] in enumerate(tqdm.tqdm(self.test_data_loader)): # rays + view_dirs
                 batch_size = rays.shape[0]
                 # view_dirs -> NDC 처리 전의 get_rays로부터
                 view_dirs = viewing_directions(view_dirs) # [1024, 3]
@@ -344,7 +358,7 @@ class Solver(object):
                 
                 # Hierarchical sampling + viewing_directions
                 fine_pts, fine_z_vals = Hierarchical_Sampling(rays, z_vals, weights, batch_size, self.sample_num, self.device).outputs()
-                fine_pts = fine_pts.reshape(batch_size, 128, 3) # [1024, 128, 3]
+                fine_pts = fine_pts.reshape(batch_size, self.coarse_num + self.fine_num, 3) # [1024, 128, 3], 128 = self.coarse_num + self.fine_num
                 
                 fine_view_dirs = view_dirs[:,None].expand(fine_pts.shape) # [1024, 128, 3]
                 fine_pts = fine_pts.reshape(-1, 3)
@@ -361,7 +375,7 @@ class Solver(object):
                 # Fine model
                 fine_outputs = self.fine_model(fine_inputs, sampling='fine')
                 # fine_outputs = self.fine_model(fine_inputs)
-                fine_outputs = fine_outputs.reshape(rays.shape[0], 128, 4)
+                fine_outputs = fine_outputs.reshape(rays.shape[0], self.coarse_num + self.fine_num, 4) # 128 = self.coarse_num + self.fine_num
 
                 # classic volume rendering
                 fine_rgb_2d, fine_weights = self.classic_volume_rendering(fine_outputs, fine_z_vals, rays, self.device) # z_vals -> Stratified sampling된 후의 z_vals
@@ -372,10 +386,11 @@ class Solver(object):
                 # 하나의 image 씩 -> batch_size가 1024가 아닐 때, (다른 dataset의 경우) image list의 길이가 378 x 504를 넘을 때, 하나의 이미지로 만든다.
                 test_image_list.append(fine_rgb_2d)
         
-                if batch_size != 1024 or len(test_image_list) >= self.height * self.width:
+                if batch_size != self.batch_size or len(test_image_list) >= self.height * self.width: # self.batch_size = 1024
                     test_image_arr = np.concatenate(test_image_list, axis=0)
                     test_image_arr = test_image_arr.reshape(120, self.height, self.width, 3)
-                    cv.imwrite('./results/test/{}.png'.format(), test_image_arr)
+                    # cv.imwrite('./results/test/{}.png'.format(), test_image_arr)
+                    cv.imwrite(os.path.join(self.save_test_path, 'test_{}.png'.format(i)), test_image_arr)
                     test_image_list = [] # 이미지 1개 만들어내면, list 비우기
                     i += 1
                     
